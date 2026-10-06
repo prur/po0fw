@@ -164,7 +164,7 @@ async function testNetworkChangeAlwaysConfirmsThreeTimes() {
   assert.equal(lastSuccess.currentIp, "203.0.113.0/24");
   assert.equal(lastSuccess.interface, "pdp_ip0");
   assert.equal(typeof lastSuccess.ts, "number");
-  assert.equal(run.store.get("po0_fw_event_lease"), "0", "completed event must release its coalescing lease");
+  assert.equal(JSON.parse(run.store.get("po0_fw_event_lease")).owner, "TESTSESSION");
 }
 
 async function testNetworkChangeReadsEveryRoundAndWritesOnlyWhenNeeded() {
@@ -232,6 +232,26 @@ async function testConcurrentNetworkEventsChooseOneLeaseOwner() {
   assert.equal(runs.filter((run) => /已合并重复网络事件/.test(run.result.title)).length, 1);
 }
 
+async function testLeaseSettlementYieldsToCompetingWriter() {
+  let replaced = false;
+  const run = await runSurgeScript({
+    eventName: "network-changed",
+    sessionID: "LEASE-A",
+    onDelay(ms, store) {
+      if (!replaced && ms === 100) {
+        replaced = true;
+        store.set("po0_fw_event_lease", JSON.stringify({ ts: Date.now(), owner: "LEASE-B" }));
+      }
+    },
+    responses: [{ body: successBody("198.51.100.0/24") }],
+  });
+
+  assert.equal(run.gets.length, 0);
+  assert.equal(run.posts.length, 0);
+  assert.match(run.result.title, /已合并重复网络事件/);
+  assert.equal(JSON.parse(run.store.get("po0_fw_event_lease")).owner, "LEASE-B");
+}
+
 async function testStaleLeaseCanBeTakenOver() {
   const stale = JSON.stringify({ ts: Date.now() - 61000, owner: "OLD" });
   const run = await runSurgeScript({
@@ -246,7 +266,7 @@ async function testStaleLeaseCanBeTakenOver() {
   });
 
   assert.equal(run.gets.length, 3);
-  assert.equal(run.store.get("po0_fw_event_lease"), "0");
+  assert.equal(JSON.parse(run.store.get("po0_fw_event_lease")).owner, "NEW");
 }
 
 async function testOldOwnerDoesNotReleaseNewOwnerLease() {
@@ -466,6 +486,8 @@ async function testMalformedSuccessResponseIsRejectedWithoutUndefinedFields() {
 async function testMalformedSuccessSchemaIsRejectedFailClosed() {
   const malformedBodies = [
     JSON.stringify({ enabled: true, currentIp: "999.1.1.1/24", limit: 5, whitelist: [] }),
+    JSON.stringify({ enabled: true, currentIp: "198.51.100.1/24", limit: 5, whitelist: [] }),
+    JSON.stringify({ enabled: true, currentIp: "01.51.100.0/24", limit: 5, whitelist: [] }),
     JSON.stringify({ enabled: true, currentIp: "198.51.100.0/24", limit: 5, whitelist: [{ slot: null }] }),
     JSON.stringify({
       enabled: true,
@@ -517,6 +539,40 @@ async function testPanelAutoIntervalUsesReadOnlyStatus() {
   assert.match(run.result.title, /po0 加白 1\/1/);
 }
 
+async function testStashTileIsReadOnlyAndSilent() {
+  const currentIp = "203.0.113.0/24";
+  const run = await runSurgeScript({
+    scriptType: "tile",
+    trigger: undefined,
+    responses: [{ body: stateBody(currentIp, ["198.51.100.0/24"]) }],
+  });
+
+  assert.equal(run.gets.length, 1);
+  assert.equal(run.posts.length, 0);
+  assert.equal(run.notifications.length, 0);
+  assert.match(run.result.title, /po0 加白 0\/1/);
+}
+
+async function testPanelRedactsPersistedAutomaticSuccessFields() {
+  const run = await runSurgeScript({
+    trigger: "auto-interval",
+    scriptType: "generic",
+    initialStore: {
+      po0_fw_last_auto_success: JSON.stringify({
+        ts: Date.now(),
+        trigger: "pgnfw_trigger_secret",
+        interface: "pgnfw_interface_secret",
+        currentIp: "pgnfw_ip_secret",
+      }),
+    },
+    responses: [{ body: successBody("198.51.100.0/24") }],
+  });
+
+  assert.doesNotMatch(run.result.content, /pgnfw_(?:trigger|interface|ip)_secret/);
+  assert.match(run.result.content, /pgnfw_REDACTED/);
+  assert.match(run.result.content, /unknown/);
+}
+
 async function testPanelAutoIntervalMissingTokenDoesNotNotify() {
   const run = await runSurgeScript({
     trigger: "auto-interval",
@@ -533,6 +589,7 @@ async function testPanelAutoIntervalExceptionIsRedactedAndDoesNotNotify() {
   const run = await runSurgeScript({
     trigger: "auto-interval",
     scriptType: "generic",
+    argument: null,
     storeReadError: "store failed for pgnfw_test_secret",
     responses: [{ body: successBody("198.51.100.0/24") }],
   });
@@ -638,6 +695,91 @@ async function testPinnedSlotPreflightSurfacesWrongSlotConflict() {
   assert.match(run.result.content, /槽位冲突/);
 }
 
+async function testSlotless403IsNotMislabeledAsSlotConflict() {
+  const ip = "198.51.100.0/24";
+  const run = await runSurgeScript({
+    trigger: "button",
+    scriptType: "generic",
+    responses: [
+      { body: stateBody(ip, []) },
+      { status: 403, body: JSON.stringify({ code: 403, message: "forbidden" }) },
+    ],
+  });
+
+  assert.match(run.result.content, /HTTP 403：forbidden/);
+  assert.doesNotMatch(run.result.content, /槽位冲突/);
+  assert.match(run.logs.join("\n"), /apiCode=403/);
+}
+
+async function testPinned403RejectsUntrustedCurrentIp() {
+  const ip = "198.51.100.0/24";
+  const run = await runSurgeScript({
+    trigger: "button",
+    scriptType: "generic",
+    argument: "tokens=pgnfw_test_secret@0",
+    responses: [
+      { body: stateBody(ip, []) },
+      {
+        status: 403,
+        body: JSON.stringify({ code: 403, message: "slot conflict", currentIp: "pgnfw_leaked_secret" }),
+      },
+    ],
+  });
+
+  assert.match(run.result.content, /HTTP 403：slot conflict/);
+  assert.doesNotMatch(run.result.content, /槽位冲突：本机 IP/);
+  assert.doesNotMatch(run.result.content, /pgnfw_leaked_secret/);
+  assert.doesNotMatch(run.logs.join("\n"), /pgnfw_leaked_secret/);
+  assert.match(run.logs.join("\n"), /apiCode=403/);
+  for (const value of run.store.values()) assert.doesNotMatch(String(value), /pgnfw_leaked_secret/);
+}
+
+async function testMalformedWhitelistSlotsAreRejected() {
+  const ip = "198.51.100.0/24";
+  for (const entry of [
+    { ip, slot: "0" },
+    { ip, slot: false },
+    { ip, slot: "" },
+    { ip },
+  ]) {
+    const run = await runSurgeScript({
+      trigger: "button",
+      scriptType: "generic",
+      argument: "tokens=pgnfw_test_secret@0",
+      responses: [{ body: stateBody(ip, [entry]) }],
+    });
+    assert.equal(run.posts.length, 0);
+    assert.match(run.result.content, /响应字段无效 \(HTTP 200\)/);
+  }
+}
+
+async function testMalformedTokenSlotSuffixIsRejected() {
+  const run = await runSurgeScript({
+    trigger: "button",
+    scriptType: "generic",
+    argument: "tokens=pgnfw_test_secret@not-a-slot",
+    responses: [{ body: successBody("198.51.100.0/24") }],
+  });
+
+  assert.equal(run.gets.length, 0);
+  assert.equal(run.posts.length, 0);
+  assert.match(run.result.title, /未配置 token/);
+}
+
+async function testConfiguredSlotMustFitServerLimit() {
+  const ip = "198.51.100.0/24";
+  const run = await runSurgeScript({
+    trigger: "button",
+    scriptType: "generic",
+    argument: "tokens=pgnfw_test_secret@9",
+    responses: [{ body: stateBody(ip, []) }],
+  });
+
+  assert.equal(run.gets.length, 1);
+  assert.equal(run.posts.length, 0);
+  assert.match(run.result.content, /配置槽位超出范围：应为 0-4/);
+}
+
 async function testPinnedSlotPreflightSkipsWriteWhenSlotMatches() {
   const ip = "198.51.100.0/24";
   const run = await runSurgeScript({
@@ -692,6 +834,7 @@ async function testPanelShowsLastAutomaticSuccessWithoutReplacingIt() {
   await testDuplicateNetworkEventIsCoalesced();
   await testLeaseWriteFailureFailsOpenWithDiagnostic();
   await testConcurrentNetworkEventsChooseOneLeaseOwner();
+  await testLeaseSettlementYieldsToCompetingWriter();
   await testStaleLeaseCanBeTakenOver();
   await testOldOwnerDoesNotReleaseNewOwnerLease();
   await testEventWorstCaseBudgetStaysUnderModuleTimeout();
@@ -708,6 +851,8 @@ async function testPanelShowsLastAutomaticSuccessWithoutReplacingIt() {
   await testMalformedSuccessSchemaIsRejectedFailClosed();
   await testEmbeddedApi429IsRetried();
   await testPanelAutoIntervalUsesReadOnlyStatus();
+  await testStashTileIsReadOnlyAndSilent();
+  await testPanelRedactsPersistedAutomaticSuccessFields();
   await testPanelAutoIntervalMissingTokenDoesNotNotify();
   await testPanelAutoIntervalExceptionIsRedactedAndDoesNotNotify();
   await testPanelAutoIntervalFailureDoesNotNotify();
@@ -715,6 +860,11 @@ async function testPanelShowsLastAutomaticSuccessWithoutReplacingIt() {
   await testButtonWorstCaseRetryBudgetStaysUnderModuleTimeout();
   await testPinnedSlotPreflightUpgradesSlotlessEntry();
   await testPinnedSlotPreflightSurfacesWrongSlotConflict();
+  await testSlotless403IsNotMislabeledAsSlotConflict();
+  await testPinned403RejectsUntrustedCurrentIp();
+  await testMalformedWhitelistSlotsAreRejected();
+  await testMalformedTokenSlotSuffixIsRejected();
+  await testConfiguredSlotMustFitServerLimit();
   await testPinnedSlotPreflightSkipsWriteWhenSlotMatches();
   await testPanelButtonSkipsPostWhenAlreadyApplied();
   await testPanelShowsLastAutomaticSuccessWithoutReplacingIt();

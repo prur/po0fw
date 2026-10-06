@@ -15,8 +15,9 @@
  *
  * 策略：
  * - 所有自动任务先 GET；只有当前来源 /24 缺失时才 POST，避免重复写入撞限频。
- * - network-changed / engine-started 先用无 CAS 持久化存储做 60 秒 best-effort 所有者租约，
- *   并等待 100ms 复读确认写入胜者；服务端幂等与 GET-first 仍是并发下的最终防线。
+ * - network-changed / engine-started 先用无 CAS 持久化存储做 30 秒 best-effort 所有者租约，
+ *   并等待 100ms 复读确认写入胜者；记录不在完成时清零，而是留到 TTL 过期，避免
+ *   旧 owner 的非原子清理擦掉新 owner。服务端幂等与 GET-first 仍是并发下的最终防线。
  *   获胜会话再按 3s、5s、8s 的间隔确认三次，覆盖双 SIM 切换期间
  *   IPv6-only / 旧出口 / 新出口三个阶段。
  * - 事件路径单次 GET/POST 最多等 5 秒且不做嵌套重试，GET+POST 的最坏总运行
@@ -47,7 +48,7 @@ var STORE_PREFIX = "po0_fw_";
 var TOKENS_KEY = "po0fw_tokens";
 var LAST_SUCCESS_KEY = "po0_fw_last_auto_success";
 var EVENT_LEASE_KEY = "po0_fw_event_lease";
-var EVENT_COALESCE_MS = 60000;
+var EVENT_COALESCE_MS = 30000;
 var EVENT_LEASE_SETTLE_MS = 100;
 var HIST_WINDOW_MS = 24 * 3600 * 1000; // 📶 标记的记账窗口
 
@@ -258,7 +259,10 @@ function getTriggerName() {
     if (typeof $script !== "undefined" && $script) {
       var scriptType = String($script.type || "").toLowerCase();
       var scriptName = String($script.name || "").toLowerCase();
+      if (scriptType === "tile") return "auto-interval";
       if (scriptType === "cron" || scriptName.indexOf("cron") >= 0) return "cron";
+      if (scriptName.indexOf("start") >= 0) return "engine-started";
+      if (scriptType === "event" || /(^|[-_])event($|[-_])/.test(scriptName)) return "network-changed";
     }
   } catch (e) {}
   // Quantumult X 的 task_local 不提供 Surge 风格 $cronexp；本脚本在 QX 仅作为定时任务使用。
@@ -315,21 +319,17 @@ function prepareEventLease(name) {
   });
 }
 
-function releaseEventLease(lease) {
-  if (!lease || !lease.owner) return;
-  try {
-    var current = JSON.parse(storeRead(EVENT_LEASE_KEY) || "null");
-    if (current && current.owner === lease.owner) storeWrite("0", EVENT_LEASE_KEY);
-  } catch (e) {}
-}
+// 不在完成时清零租约。持久化存储没有 compare-and-delete；旧 owner 的“读后清零”
+// 可能擦掉刚接管的新 owner。记录保留到 EVENT_COALESCE_MS 过期，由下一次合法接管覆盖。
 
 function getPrimaryInterface() {
   try {
-    return (
+    var iface =
       ($network.v4 && $network.v4.primaryInterface) ||
       ($network.v6 && $network.v6.primaryInterface) ||
-      "unknown"
-    );
+      "unknown";
+    iface = String(iface);
+    return /^[A-Za-z0-9._-]{1,32}$/.test(iface) ? iface : "unknown";
   } catch (e) {
     return "unknown";
   }
@@ -424,7 +424,8 @@ function readHistory(key) {
 
 function isPanelInvocation() {
   try {
-    return typeof $input !== "undefined" && $input && $input.purpose === "panel";
+    if (typeof $input !== "undefined" && $input && $input.purpose === "panel") return true;
+    return typeof $script !== "undefined" && $script && String($script.type || "").toLowerCase() === "tile";
   } catch (e) {
     return false;
   }
@@ -437,8 +438,10 @@ function pad2(value) {
 function describeLastAutoSuccess() {
   try {
     var state = JSON.parse(storeRead(LAST_SUCCESS_KEY) || "null");
-    if (!state || !state.ts) return "最近自动成功：暂无";
-    var d = new Date(state.ts);
+    var timestampValue = state && Number(state.ts);
+    if (!state || !isFinite(timestampValue) || timestampValue <= 0) return "最近自动成功：暂无";
+    var d = new Date(timestampValue);
+    if (!isFinite(d.getTime())) return "最近自动成功：记录损坏";
     var timestamp =
       d.getFullYear() +
       "-" +
@@ -455,11 +458,11 @@ function describeLastAutoSuccess() {
       "最近自动成功：" +
       timestamp +
       " · " +
-      (state.trigger || "unknown") +
+      (sanitizeLogText(state.trigger) || "unknown") +
       " · " +
-      (state.interface || "unknown") +
+      (sanitizeLogText(state.interface) || "unknown") +
       " · " +
-      (state.currentIp || "unknown")
+      (isValidIpv4Value(state.currentIp) ? state.currentIp : "unknown")
     );
   } catch (e) {
     return "最近自动成功：记录损坏";
@@ -497,18 +500,26 @@ function isValidIpv4Value(value) {
   if (octets.length !== 4) return false;
   for (var i = 0; i < octets.length; i++) {
     if (!/^\d{1,3}$/.test(octets[i])) return false;
+    if (octets[i].length > 1 && octets[i].charAt(0) === "0") return false;
     var n = Number(octets[i]);
     if (n < 0 || n > 255) return false;
   }
+  if (parts.length === 2 && Number(octets[3]) !== 0) return false;
   return true;
 }
 
 function isValidWhitelistEntry(entry, limit) {
   if (typeof entry === "string") return isValidIpv4Value(entry);
   if (!entry || typeof entry !== "object" || !isValidIpv4Value(entry.ip)) return false;
-  if (entry.slot === null || entry.slot === undefined) return true;
-  var slot = Number(entry.slot);
-  return isFinite(slot) && Math.floor(slot) === slot && slot >= 0 && slot < limit;
+  if (!Object.prototype.hasOwnProperty.call(entry, "slot")) return false;
+  if (entry.slot === null) return true;
+  return (
+    typeof entry.slot === "number" &&
+    isFinite(entry.slot) &&
+    Math.floor(entry.slot) === entry.slot &&
+    entry.slot >= 0 &&
+    entry.slot < limit
+  );
 }
 
 function apiCall(token, slot, requestOptions, method) {
@@ -537,13 +548,23 @@ function apiCall(token, slot, requestOptions, method) {
     try {
       data = JSON.parse(r.body);
     } catch (e) {}
-    // 带槽位写入且本机 IP 已占用别的槽位 → 服务端 403 冲突，需去 UI 删旧槽位
-    if (method === "POST" && r.status === 403) {
+    // 仅“固定槽位写入 + 服务端回显合法 currentIp”的 403 才可解释为槽位冲突；
+    // slotless / 鉴权 / 畸形 403 保留原始 HTTP 语义。
+    var hasRequestedSlot = slot !== null && slot !== undefined && slot !== "";
+    if (
+      method === "POST" &&
+      r.status === 403 &&
+      hasRequestedSlot &&
+      data &&
+      isValidIpv4Value(data.currentIp)
+    ) {
+      var conflictApiCode = Number(data && data.code);
       return {
         error: "槽位冲突：本机 IP 已在其它槽位，请先去 UI 删除",
         conflict: true,
-        currentIp: data && data.currentIp,
+        currentIp: data && isValidIpv4Value(data.currentIp) ? data.currentIp : undefined,
         httpStatus: r.status,
+        apiCode: conflictApiCode >= 400 ? conflictApiCode : undefined,
       };
     }
     if (r.status < 200 || r.status >= 300) {
@@ -623,7 +644,7 @@ function ensureWhitelisted(item, index, requestOptions) {
   function complete(st) {
     st.ready =
       st.applied === true &&
-      (!requiresSlot || (st.currentSlot !== null && st.currentSlot !== undefined && Number(st.currentSlot) === Number(item.slot)));
+      (!requiresSlot || (typeof st.currentSlot === "number" && st.currentSlot === item.slot));
     if (st.applied) {
       var hist = readHistory(kvHist);
       var last = hist.length ? hist[hist.length - 1] : null;
@@ -639,6 +660,11 @@ function ensureWhitelisted(item, index, requestOptions) {
   if (requestOptions.readOnly || requestOptions.preflight) {
     return apiCall(item.token, item.slot, requestOptions, "GET").then(function (st) {
       complete(st);
+      if (!st.error && requiresSlot && typeof st.limit === "number" && item.slot >= st.limit) {
+        st.error = "配置槽位超出范围：应为 0-" + (st.limit - 1);
+        st.ready = false;
+        return ctx;
+      }
       if (requestOptions.readOnly || st.error || st.enabled === false || st.ready) return ctx;
       return apiCall(item.token, item.slot, requestOptions, "POST").then(complete);
     });
@@ -674,24 +700,51 @@ function describe(index, ctx) {
   return head + "✅ " + st.whitelist.length + "/" + st.limit + "\n    " + ips;
 }
 
-// 分隔符兼容 , | ; 、；非 pgnfw_ 开头的段（如未修改的占位提示）直接忽略。
+// 分隔符兼容 , | ; 、；非 pgnfw_ 开头或带非法 @槽位后缀的段直接忽略。
 // 每段可带可选 @槽位 后缀：pgnfw_xxx@0 → 钉槽位 0；无后缀则 slotless。
-var tokens = (getArgumentTokens() || storeRead(TOKENS_KEY) || INLINE_TOKENS || "")
-  .split(/[,|;、\s]+/)
-  .map(function (s) {
-    return s.trim();
-  })
-  .filter(function (s) {
-    return s.indexOf("pgnfw_") === 0;
-  })
-  .map(function (s) {
-    var at = s.indexOf("@");
-    if (at === -1) return { token: s, slot: null };
-    var n = parseInt(s.slice(at + 1), 10);
-    return { token: s.slice(0, at), slot: isNaN(n) ? null : n };
-  });
+function parseTokenConfig(raw) {
+  var seen = {};
+  return String(raw || "")
+    .split(/[,|;、\s]+/)
+    .map(function (s) {
+      return s.trim();
+    })
+    .map(function (s) {
+      var at = s.indexOf("@");
+      var token = at === -1 ? s : s.slice(0, at);
+      if (!/^pgnfw_[A-Za-z0-9_-]+$/.test(token)) return null;
+      var slot = null;
+      if (at !== -1) {
+        var suffix = s.slice(at + 1);
+        if (!/^\d+$/.test(suffix)) return null;
+        slot = Number(suffix);
+        if (!isFinite(slot) || Math.floor(slot) !== slot || slot < 0 || slot > 99) return null;
+      }
+      var key = token + "@" + (slot === null ? "" : slot);
+      if (seen[key]) return null;
+      seen[key] = true;
+      return { token: token, slot: slot };
+    })
+    .filter(function (item) {
+      return item !== null;
+    });
+}
 
-var triggerName = getTriggerName();
+function loadTokens() {
+  var argumentTokens = getArgumentTokens();
+  var raw = argumentTokens || storeRead(TOKENS_KEY) || INLINE_TOKENS || "";
+  return parseTokenConfig(raw);
+}
+
+var tokens = [];
+var triggerName = "manual";
+try {
+  var detectedTrigger = getTriggerName();
+  var knownTriggers = ["network-changed", "engine-started", "cron", "button", "auto-interval", "manual"];
+  if (knownTriggers.indexOf(detectedTrigger) >= 0) triggerName = detectedTrigger;
+} catch (e) {
+  if (isPanelInvocation()) triggerName = "auto-interval";
+}
 var STABILIZATION_DELAYS_MS = [3000, 5000, 8000];
 
 function runEnsureRound(requestOptions, attempt, total) {
@@ -733,7 +786,7 @@ function runEnsurePlan() {
   return sequence;
 }
 
-function completeRun(results, eventLease) {
+function completeRun(results) {
   var okCount = 0;
   var exitIp = "?";
   var lines = [];
@@ -774,54 +827,51 @@ function completeRun(results, eventLease) {
   if ((changed || !allOk) && triggerName !== "auto-interval") {
     notify("po0 防火墙加白", title, content);
   }
-  releaseEventLease(eventLease);
   finish(title, content, allOk);
 }
 
-function failRun(error, eventLease) {
-  releaseEventLease(eventLease);
+function failRun(error) {
   var errorText = sanitizeLogText(error && error.message ? error.message : error) || "未知脚本异常";
   if (triggerName !== "auto-interval") notify("po0 防火墙加白", "脚本异常", errorText);
   finish("po0 加白：脚本异常", errorText, false);
 }
 
-if (tokens.length === 0) {
-  if (triggerName !== "auto-interval") {
-    notify(
-      "po0 防火墙加白",
-      "未配置 token",
-      "模块参数 tokens / 存储 key po0fw_tokens / 脚本内 INLINE_TOKENS 三选一填入 pgnfw_ token"
-    );
-  }
-  finish("po0 加白：未配置 token", "请填入 pgnfw_ token，多个用 | 分割", false);
-} else {
-  var eventLease = null;
-  Promise.resolve()
-    .then(function () {
-      return prepareEventLease(triggerName);
-    })
-    .then(function (lease) {
-      eventLease = lease;
-      if (lease.coalesced) {
-        if (typeof console !== "undefined" && typeof console.log === "function") {
-          console.log(
-            "[po0fw] trigger=" +
-              triggerName +
-              " coalesced=yes interface=" +
-              getPrimaryInterface() +
-              " windowMs=" +
-              EVENT_COALESCE_MS
-          );
-        }
-        finish("po0 加白：已合并重复网络事件", "已有稳定窗口任务正在确认当前出口", true);
-        return null;
+Promise.resolve()
+  .then(function () {
+    tokens = loadTokens();
+    if (tokens.length > 0) return prepareEventLease(triggerName);
+
+    if (triggerName !== "auto-interval") {
+      notify(
+        "po0 防火墙加白",
+        "未配置 token",
+        "模块参数 tokens / 存储 key po0fw_tokens / 脚本内 INLINE_TOKENS 三选一填入 pgnfw_ token"
+      );
+    }
+    finish("po0 加白：未配置 token", "请填入 pgnfw_ token，多个用 | 分割", false);
+    return { stopped: true };
+  })
+  .then(function (lease) {
+    if (lease.stopped) return null;
+    if (lease.coalesced) {
+      if (typeof console !== "undefined" && typeof console.log === "function") {
+        console.log(
+          "[po0fw] trigger=" +
+            triggerName +
+            " coalesced=yes interface=" +
+            getPrimaryInterface() +
+            " windowMs=" +
+            EVENT_COALESCE_MS
+        );
       }
-      return runEnsurePlan();
-    })
-    .then(function (results) {
-      if (results !== null) completeRun(results, eventLease);
-    })
-    .catch(function (error) {
-      failRun(error, eventLease);
-    });
-}
+      finish("po0 加白：已合并重复网络事件", "已有稳定窗口任务正在确认当前出口", true);
+      return null;
+    }
+    return runEnsurePlan();
+  })
+  .then(function (results) {
+    if (results !== null) completeRun(results);
+  })
+  .catch(function (error) {
+    failRun(error);
+  });
