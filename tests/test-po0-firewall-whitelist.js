@@ -22,6 +22,7 @@ function runSurgeScript({
   eventName,
   trigger,
   cronexp,
+  argument = "tokens=pgnfw_test_secret",
   scriptType = "event",
   responses,
   initialStore = {},
@@ -54,7 +55,7 @@ function runSurgeScript({
         queueMicrotask(callback);
         return delays.length;
       },
-      $argument: "tokens=pgnfw_test_secret",
+      $argument: argument,
       $environment: { "surge-version": "6.9.1" },
       $network: {
         v4: { primaryInterface: "pdp_ip0", primaryAddress: "10.0.0.2" },
@@ -155,7 +156,48 @@ async function testNetworkChangeUsesBoundedIndependentAttempts() {
     "each Surge event request must have an eight-second cap",
   );
   assert.deepEqual(run.delays, [3000, 5000, 8000]);
-  assert.match(run.result.title, /脚本异常|po0 加白 0\/1/);
+  assert.match(run.result.title, /po0 加白 0\/1/);
+  assert.equal(run.store.has("po0_fw_last_auto_success"), false);
+}
+
+async function testFinalRoundFailureIsNotReportedAsAutomaticSuccess() {
+  const run = await runSurgeScript({
+    eventName: "network-changed",
+    responses: [
+      { body: successBody("198.51.100.0/24") },
+      { body: successBody("203.0.113.0/24") },
+      { error: "final confirmation offline" },
+    ],
+  });
+
+  assert.equal(run.posts.length, 3);
+  assert.match(run.result.title, /po0 加白 0\/1/);
+  assert.equal(run.store.has("po0_fw_last_auto_success"), false);
+  assert.ok(run.notifications.length >= 1, "a failed final confirmation must notify");
+}
+
+async function testMultipleTokensAreConfirmedInEveryRound() {
+  const run = await runSurgeScript({
+    eventName: "network-changed",
+    argument: "tokens=pgnfw_fixture_one,pgnfw_fixture_two",
+    responses: [
+      { body: successBody("198.51.100.0/24") },
+      { body: successBody("192.0.2.0/24") },
+      { body: successBody("198.51.100.0/24") },
+      { body: successBody("192.0.2.0/24") },
+      { body: successBody("203.0.113.0/24") },
+      { body: successBody("203.0.114.0/24") },
+    ],
+  });
+
+  assert.equal(run.posts.length, 6);
+  assert.match(run.result.title, /po0 加白 2\/2/);
+  assert.match(run.result.content, /203\.0\.113\.0\/24/);
+  assert.match(run.result.content, /203\.0\.114\.0\/24/);
+  assert.equal(run.logs.length, 3);
+  assert.match(run.logs[2], /token#1 status=ok/);
+  assert.match(run.logs[2], /token#2 status=ok/);
+  assert.doesNotMatch(run.logs.join("\n"), /pgnfw_fixture_one|pgnfw_fixture_two/);
 }
 
 async function testEngineStartUsesTheSameStabilizationPlan() {
@@ -217,6 +259,8 @@ async function testPanelShowsLastAutomaticSuccessWithoutReplacingIt() {
 (async () => {
   await testNetworkChangeAlwaysConfirmsThreeTimes();
   await testNetworkChangeUsesBoundedIndependentAttempts();
+  await testFinalRoundFailureIsNotReportedAsAutomaticSuccess();
+  await testMultipleTokensAreConfirmedInEveryRound();
   await testEngineStartUsesTheSameStabilizationPlan();
   await testCronKeepsTransientRetriesAndRecordsSuccess();
   await testPanelShowsLastAutomaticSuccessWithoutReplacingIt();
