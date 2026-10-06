@@ -1,0 +1,55 @@
+name: Proxy-client JavaScript
+
+on:
+  push:
+    paths:
+      - "scripts/po0-firewall-whitelist.js"
+      - "surge/po0-firewall-whitelist.sgmodule"
+      - "loon/po0-firewall-whitelist.plugin"
+      - "stash/po0-firewall-whitelist.stoverride"
+      - "quantumultx/po0-firewall-whitelist.snippet"
+      - "shadowrocket/po0-firewall-whitelist.srmodule"
+      - "tests/test-po0-firewall-whitelist.js"
+      - "tests/test-client-compatibility.js"
+      - "tests/test-pinned-script-references.js"
+      - "tests/test-surge-module.js"
+      - ".github/workflows/javascript.yml"
+  pull_request:
+    paths:
+      - "scripts/po0-firewall-whitelist.js"
+      - "surge/po0-firewall-whitelist.sgmodule"
+      - "loon/po0-firewall-whitelist.plugin"
+      - "stash/po0-firewall-whitelist.stoverride"
+      - "quantumultx/po0-firewall-whitelist.snippet"
+      - "shadowrocket/po0-firewall-whitelist.srmodule"
+      - "tests/test-po0-firewall-whitelist.js"
+      - "tests/test-client-compatibility.js"
+      - "tests/test-pinned-script-references.js"
+      - "tests/test-surge-module.js"
+      - ".github/workflows/javascript.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  node:
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: Syntax check
+        run: node --check scripts/po0-firewall-whitelist.js
+      - name: Run JavaScript behavior tests
+        run: node tests/test-po0-firewall-whitelist.js
+      - name: Run proxy-client compatibility tests
+        run: node tests/test-client-compatibility.js
+      - name: Verify immutable script references
+        run: node tests/test-pinned-script-references.js
+      - name: Validate Surge module
+        run: node tests/test-surge-module.js

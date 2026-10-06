@@ -44,6 +44,26 @@ Surge / Loon / Stash / Quantumult X / Shadowrocket / Egern 六客户端脚本模
 
 > 模块部分借鉴自 [reallinzc/po0fw](https://github.com/reallinzc/po0fw)，感谢原作者。
 
+### 本 fork 的 Surge 双 SIM 修复
+
+本 fork 保留上游完整 Git 历史；修改前基线是上游提交
+[`f4986ab`](https://github.com/w0ven/po0fw/commit/f4986abefe2c0f5451aa819b386698668ef836f5)，
+并以 `baseline-upstream-f4986ab` 标签标记。因此无需额外复制一份仓库即可回退。
+
+- `network-changed` 与 `engine-started` 不再立即只请求一次：脚本先等待链路稳定，再进行三轮幂等确认，覆盖双 SIM 切换时“首次请求仍走旧出口”的竞态。
+- 三轮事件请求各自最多等待 8 秒、不做嵌套重试，最坏运行时间保持在模块的 60 秒预算内；cron、面板仍保留原有三次瞬时错误重试。
+- Surge cron 启用 `wake-system=true`，使 iOS 空闲或 App 被挂起时仍可每 10 分钟兜底。
+- 增加 `engine-started` 触发器。该事件要求 **Surge iOS 5.22.0+ / Surge Mac 6.9.0+**；更旧版本应删除 `po0-fw-start` 行。
+- 脚本日志记录触发来源、轮次、接口、耗时和服务端回显 IP，但不记录 token 或含 token 的 URL；面板显示最近一次自动成功状态。
+- 使用共享 JavaScript 的五个客户端模块（Surge、Loon、Stash、Quantumult X、Shadowrocket）固定引用已审计脚本提交
+  [`ccc62ff`](https://github.com/prur/po0fw/commit/ccc62ffbb254f48227becf44c695e4830445e5a1)，不跟随可变的 `main`。
+
+回退脚本时可把 `script-path` 改为原始基线的不可变 URL：
+
+```text
+https://raw.githubusercontent.com/w0ven/po0fw/f4986abefe2c0f5451aa819b386698668ef836f5/scripts/po0-firewall-whitelist.js
+```
+
 ## 安装
 
 ### Linux / macOS / 安卓 Termux
