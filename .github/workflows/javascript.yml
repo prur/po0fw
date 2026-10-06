@@ -1,0 +1,39 @@
+name: Proxy-client JavaScript
+
+on:
+  push:
+    paths:
+      - "scripts/po0-firewall-whitelist.js"
+      - "surge/po0-firewall-whitelist.sgmodule"
+      - "tests/test-po0-firewall-whitelist.js"
+      - "tests/test-surge-module.js"
+      - ".github/workflows/javascript.yml"
+  pull_request:
+    paths:
+      - "scripts/po0-firewall-whitelist.js"
+      - "surge/po0-firewall-whitelist.sgmodule"
+      - "tests/test-po0-firewall-whitelist.js"
+      - "tests/test-surge-module.js"
+      - ".github/workflows/javascript.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  node:
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: Syntax check
+        run: node --check scripts/po0-firewall-whitelist.js
+      - name: Run JavaScript behavior tests
+        run: node tests/test-po0-firewall-whitelist.js
+      - name: Validate Surge module
+        run: node tests/test-surge-module.js

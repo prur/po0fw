@@ -14,8 +14,12 @@
  *
  * 策略：
  * - 每次直接 POST 上报当前出口 IP，蜂窝与 WiFi/有线同等处理。
- * - 默认 slotless 写入：按 updated_at 触发 LRU 淘汰，被挤出的设备靠自己的
- *   cron/事件几分钟内自动补回。
+ * - network-changed / engine-started 先等待链路稳定，再按 3s、5s、8s 的间隔
+ *   连续确认三次；即使旧出口请求成功也继续复验，覆盖双 SIM 切换竞态。
+ * - 事件路径每次请求最多等 8 秒且不做嵌套重试，三轮最坏约 40 秒，保持在
+ *   模块 timeout=60 的预算内；cron / 面板仍保留三次瞬时错误重试。
+ * - 默认 slotless 写入：新 /24 在满额时按 FIFO 淘汰最旧普通记录；重复 /24
+ *   服务端幂等，不重复占坑，也不推进淘汰队列。
  * - 可选固定槽位：token 后加 @N（如 pgnfw_xxx@0）→ POST .../add?slot=N，
  *   把本机 IP 钉在槽位 N，**永不被 LRU 淘汰**。槽位写入语义：
  *     · 本机 IP 已在该槽位 → 刷新 updated_at；
@@ -36,6 +40,7 @@ var INLINE_TOKENS = "";
 var API_BASE = "https://124.221.69.228/api/firewall/"; // + <token> + "/add"
 var STORE_PREFIX = "po0_fw_";
 var TOKENS_KEY = "po0fw_tokens";
+var LAST_SUCCESS_KEY = "po0_fw_last_auto_success";
 var HIST_WINDOW_MS = 24 * 3600 * 1000; // 📶 标记的记账窗口
 
 /* ---------- 环境兼容层 ---------- */
@@ -66,6 +71,12 @@ var isSurgeFamily =
 var REQUEST_TIMEOUT = null;
 if (isLoon || isQX) REQUEST_TIMEOUT = 15000;
 else if (isSurgeFamily) REQUEST_TIMEOUT = 15;
+
+function timeoutValue(seconds) {
+  if (isLoon || isQX) return seconds * 1000;
+  if (isSurgeFamily) return seconds;
+  return null;
+}
 
 function storeRead(key) {
   if (isQX) return $prefs.valueForKey(key);
@@ -154,16 +165,17 @@ function isRetryableServerError(r) {
   }
 }
 
-function httpRequest(method, opts, attempt) {
+function httpRequest(method, opts, attempt, maxAttempts) {
   attempt = attempt || 1;
+  maxAttempts = maxAttempts || HTTP_RETRY;
   return httpRequestOnce(method, opts).then(function (r) {
     if (!r.error && !isRetryableServerError(r)) return r;
-    if (attempt >= HTTP_RETRY) {
-      if (r.error) r.error = r.error + "（已重试 " + HTTP_RETRY + " 次）";
+    if (attempt >= maxAttempts) {
+      if (r.error && maxAttempts > 1) r.error = r.error + "（已重试 " + maxAttempts + " 次）";
       return r;
     }
     return delay(HTTP_RETRY_DELAY_MS * attempt).then(function () {
-      return httpRequest(method, opts, attempt + 1);
+      return httpRequest(method, opts, attempt + 1, maxAttempts);
     });
   });
 }
@@ -205,6 +217,56 @@ function onCellular() {
   } catch (e) {
     return false; // 客户端不支持 $network 时按非蜂窝处理
   }
+}
+
+function getTriggerName() {
+  try {
+    if (typeof $event !== "undefined" && $event && $event.name) return String($event.name);
+  } catch (e) {}
+  if (typeof $cronexp !== "undefined") return "cron";
+  if (typeof $trigger !== "undefined" && $trigger) return String($trigger);
+  return "manual";
+}
+
+function isAutomaticTrigger(name) {
+  return name === "network-changed" || name === "engine-started" || name === "cron";
+}
+
+function getPrimaryInterface() {
+  try {
+    return (
+      ($network.v4 && $network.v4.primaryInterface) ||
+      ($network.v6 && $network.v6.primaryInterface) ||
+      "unknown"
+    );
+  } catch (e) {
+    return "unknown";
+  }
+}
+
+function logRound(results, attempt, total, startedAt) {
+  if (typeof console === "undefined" || typeof console.log !== "function") return;
+  var details = results
+    .map(function (ctx, index) {
+      var st = ctx.st || {};
+      var status = st.applied ? "ok" : st.error ? "error" : "not-applied";
+      return "token#" + (index + 1) + " status=" + status + " currentIp=" + (st.currentIp || "unknown");
+    })
+    .join(" ");
+  console.log(
+    "[po0fw] trigger=" +
+      triggerName +
+      " attempt=" +
+      attempt +
+      "/" +
+      total +
+      " interface=" +
+      getPrimaryInterface() +
+      " latencyMs=" +
+      Math.max(0, Date.now() - startedAt) +
+      " " +
+      details
+  );
 }
 
 function finish(title, content, allOk) {
@@ -249,7 +311,52 @@ function readHistory(key) {
   }
 }
 
-function apiCall(token, slot) {
+function isPanelInvocation() {
+  try {
+    return typeof $input !== "undefined" && $input && $input.purpose === "panel";
+  } catch (e) {
+    return false;
+  }
+}
+
+function pad2(value) {
+  return value < 10 ? "0" + value : String(value);
+}
+
+function describeLastAutoSuccess() {
+  try {
+    var state = JSON.parse(storeRead(LAST_SUCCESS_KEY) || "null");
+    if (!state || !state.ts) return "最近自动成功：暂无";
+    var d = new Date(state.ts);
+    var timestamp =
+      d.getFullYear() +
+      "-" +
+      pad2(d.getMonth() + 1) +
+      "-" +
+      pad2(d.getDate()) +
+      " " +
+      pad2(d.getHours()) +
+      ":" +
+      pad2(d.getMinutes()) +
+      ":" +
+      pad2(d.getSeconds());
+    return (
+      "最近自动成功：" +
+      timestamp +
+      " · " +
+      (state.trigger || "unknown") +
+      " · " +
+      (state.interface || "unknown") +
+      " · " +
+      (state.currentIp || "unknown")
+    );
+  } catch (e) {
+    return "最近自动成功：记录损坏";
+  }
+}
+
+function apiCall(token, slot, requestOptions) {
+  requestOptions = requestOptions || {};
   // token 走 URL 路径，命中 /add 即把当前出口 IP 加白；带 slot 则钉固定槽位
   var url = API_BASE + encodeURIComponent(token) + "/add";
   if (slot !== null && slot !== undefined && slot !== "") {
@@ -260,9 +367,11 @@ function apiCall(token, slot) {
     headers: { "Content-Type": "application/json" },
     body: "",
   };
-  if (REQUEST_TIMEOUT !== null) opts.timeout = REQUEST_TIMEOUT;
+  var timeout = requestOptions.timeout;
+  if (timeout === null || timeout === undefined) timeout = REQUEST_TIMEOUT;
+  if (timeout !== null) opts.timeout = timeout;
 
-  return httpRequest("POST", opts).then(function (r) {
+  return httpRequest("POST", opts, 1, requestOptions.maxAttempts).then(function (r) {
     if (r.error) return { error: r.error };
     var data = null;
     try {
@@ -297,14 +406,14 @@ function apiCall(token, slot) {
   });
 }
 
-function ensureWhitelisted(item, index) {
+function ensureWhitelisted(item, index, requestOptions) {
   var kvState = STORE_PREFIX + index;
   var kvHist = STORE_PREFIX + "hist_" + index;
   var cellular = onCellular();
   var ctx = { kvState: kvState, kvHist: kvHist, slot: item.slot };
 
   // 服务端对重复 IP 幂等，直接请求 /add 即可，无需先查
-  return apiCall(item.token, item.slot).then(function (st) {
+  return apiCall(item.token, item.slot, requestOptions).then(function (st) {
     if (st.applied) {
       var hist = readHistory(kvHist);
       var last = hist.length ? hist[hist.length - 1] : null;
@@ -359,6 +468,37 @@ var tokens = (getArgumentTokens() || storeRead(TOKENS_KEY) || INLINE_TOKENS || "
     return { token: s.slice(0, at), slot: isNaN(n) ? null : n };
   });
 
+var triggerName = getTriggerName();
+var STABILIZATION_DELAYS_MS = [3000, 5000, 8000];
+
+function runEnsureRound(requestOptions, attempt, total) {
+  var startedAt = Date.now();
+  return Promise.all(
+    tokens.map(function (t, i) {
+      return ensureWhitelisted(t, i, requestOptions);
+    })
+  ).then(function (results) {
+    logRound(results, attempt || 1, total || 1, startedAt);
+    return results;
+  });
+}
+
+function runEnsurePlan() {
+  var needsStabilization = triggerName === "network-changed" || triggerName === "engine-started";
+  if (!needsStabilization) return runEnsureRound(null, 1, 1);
+
+  var eventRequestOptions = { maxAttempts: 1, timeout: timeoutValue(8) };
+  var sequence = Promise.resolve(null);
+  STABILIZATION_DELAYS_MS.forEach(function (waitMs, index) {
+    sequence = sequence.then(function () {
+      return delay(waitMs).then(function () {
+        return runEnsureRound(eventRequestOptions, index + 1, STABILIZATION_DELAYS_MS.length);
+      });
+    });
+  });
+  return sequence;
+}
+
 if (tokens.length === 0) {
   notify(
     "po0 防火墙加白",
@@ -367,11 +507,7 @@ if (tokens.length === 0) {
   );
   finish("po0 加白：未配置 token", "请填入 pgnfw_ token，多个用 | 分割", false);
 } else {
-  Promise.all(
-    tokens.map(function (t, i) {
-      return ensureWhitelisted(t, i);
-    })
-  ).then(function (results) {
+  runEnsurePlan().then(function (results) {
     var okCount = 0;
     var exitIp = "?";
     var lines = [];
@@ -391,9 +527,21 @@ if (tokens.length === 0) {
     }
 
     var allOk = okCount === results.length;
+    if (allOk && isAutomaticTrigger(triggerName)) {
+      storeWrite(
+        JSON.stringify({
+          ts: Date.now(),
+          trigger: triggerName,
+          currentIp: exitIp,
+          interface: getPrimaryInterface(),
+        }),
+        LAST_SUCCESS_KEY
+      );
+    }
     var title =
       "po0 加白 " + okCount + "/" + results.length + " · 出口 " + exitIp + (onCellular() ? " 📶" : "");
     var content = lines.join("\n");
+    if (isPanelInvocation()) content += "\n\n" + describeLastAutoSuccess();
 
     // 成功态仅在出口 IP / 加白状态变化时通知；失败/未生效必须每次弹，
     // 否则持久化状态相同（都是失败）时 changed=false 会把错误静默吞掉。
