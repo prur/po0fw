@@ -37,9 +37,7 @@ function clientGlobals(client, requests, store, logs) {
         logs.push(String(message));
       },
     },
-    $cronexp: "*/10 * * * *",
     $network: { v4: { primaryInterface: "pdp_ip0" }, v6: {} },
-    $script: { name: "po0-fw-cron", type: "cron" },
   };
 
   if (client === "quantumultx") {
@@ -74,14 +72,18 @@ function clientGlobals(client, requests, store, logs) {
     ...common,
     $argument: client === "loon" ? { tokens: token } : `tokens=${token}`,
     $environment: environmentByClient[client],
+    ...(client === "surge"
+      ? { $cronexp: "*/10 * * * *", $script: { name: "po0-fw-cron", type: "cron" } }
+      : { $script: { name: "po0-fw-cron", type: "cron" } }),
     ...(client === "loon" ? { $loon: {} } : {}),
     $httpClient: {
       post(options, callback) {
-        requests.push({ ...options });
+        requests.push({ ...options, method: "POST" });
         queueMicrotask(() => callback(null, { status: 200 }, responseBody()));
       },
-      get() {
-        throw new Error("unexpected GET");
+      get(options, callback) {
+        requests.push({ ...options, method: "GET" });
+        queueMicrotask(() => callback(null, { status: 200 }, responseBody()));
       },
     },
     $persistentStore: {
@@ -122,20 +124,21 @@ function runClient(client) {
 
 (async () => {
   const expectedTimeout = {
-    surge: 15,
-    shadowrocket: 15,
-    stash: 15,
-    loon: 15000,
-    quantumultx: 15000,
+    surge: 7,
+    shadowrocket: 7,
+    stash: 7,
+    loon: 7000,
+    quantumultx: 7000,
   };
 
   for (const client of Object.keys(expectedTimeout)) {
     const run = await runClient(client);
     assert.equal(run.requests.length, 1, `${client} should complete one successful cron request`);
     assert.equal(run.requests[0].timeout, expectedTimeout[client], `${client} timeout unit regressed`);
+    assert.equal(run.requests[0].method, "GET", `${client} cron should use the read-only preflight`);
     assert.equal(
       run.requests[0].url,
-      `https://124.221.69.228/api/firewall/${encodeURIComponent(token)}/add`,
+      `https://124.221.69.228/api/firewall/${encodeURIComponent(token)}`,
       `${client} did not deliver the configured token to the request URL`,
     );
     assert.equal(JSON.parse(run.store.get("po0_fw_last_auto_success")).trigger, "cron");
