@@ -19,7 +19,7 @@ function responseBody() {
   });
 }
 
-function clientGlobals(client, requests, store, logs) {
+function clientGlobals(client, requests, store, logs, notifications) {
   const common = {
     Promise,
     Date,
@@ -37,9 +37,7 @@ function clientGlobals(client, requests, store, logs) {
         logs.push(String(message));
       },
     },
-    $cronexp: "*/10 * * * *",
     $network: { v4: { primaryInterface: "pdp_ip0" }, v6: {} },
-    $script: { name: "po0-fw-cron", type: "cron" },
   };
 
   if (client === "quantumultx") {
@@ -60,7 +58,9 @@ function clientGlobals(client, requests, store, logs) {
           return true;
         },
       },
-      $notify() {},
+      $notify(...args) {
+        notifications.push(args);
+      },
     };
   }
 
@@ -74,14 +74,20 @@ function clientGlobals(client, requests, store, logs) {
     ...common,
     $argument: client === "loon" ? { tokens: token } : `tokens=${token}`,
     $environment: environmentByClient[client],
+    ...(client === "surge"
+      ? { $cronexp: "*/10 * * * *", $script: { name: "po0-fw-cron", type: "cron" } }
+      : client === "loon"
+        ? { $script: { name: "po0-fw-cron", startTime: Date.now() } }
+        : { $script: { name: "po0-fw-cron", type: "cron" } }),
     ...(client === "loon" ? { $loon: {} } : {}),
     $httpClient: {
       post(options, callback) {
-        requests.push({ ...options });
+        requests.push({ ...options, method: "POST" });
         queueMicrotask(() => callback(null, { status: 200 }, responseBody()));
       },
-      get() {
-        throw new Error("unexpected GET");
+      get(options, callback) {
+        requests.push({ ...options, method: "GET" });
+        queueMicrotask(() => callback(null, { status: 200 }, responseBody()));
       },
     },
     $persistentStore: {
@@ -93,22 +99,28 @@ function clientGlobals(client, requests, store, logs) {
         return true;
       },
     },
-    $notification: { post() {} },
+    $notification: {
+      post(...args) {
+        notifications.push(args);
+      },
+    },
   };
 }
 
-function runClient(client) {
+function runClient(client, configureContext = null) {
   const requests = [];
   const store = new Map();
   if (client === "quantumultx") store.set("po0fw_tokens", token);
   const logs = [];
+  const notifications = [];
 
   return new Promise((resolve, reject) => {
     const watchdog = global.setTimeout(() => reject(new Error(`${client} did not call $done`)), 1000);
-    const context = clientGlobals(client, requests, store, logs);
+    const context = clientGlobals(client, requests, store, logs, notifications);
+    if (configureContext) configureContext(context);
     context.$done = (result) => {
       global.clearTimeout(watchdog);
-      resolve({ requests, store, logs, result });
+      resolve({ requests, store, logs, notifications, result });
     };
 
     try {
@@ -122,25 +134,40 @@ function runClient(client) {
 
 (async () => {
   const expectedTimeout = {
-    surge: 15,
-    shadowrocket: 15,
-    stash: 15,
-    loon: 15000,
-    quantumultx: 15000,
+    surge: 7,
+    shadowrocket: 7,
+    stash: 7,
+    loon: 7000,
+    quantumultx: 7000,
   };
 
   for (const client of Object.keys(expectedTimeout)) {
     const run = await runClient(client);
     assert.equal(run.requests.length, 1, `${client} should complete one successful cron request`);
     assert.equal(run.requests[0].timeout, expectedTimeout[client], `${client} timeout unit regressed`);
+    assert.equal(run.requests[0].method, "GET", `${client} cron should use the read-only preflight`);
     assert.equal(
       run.requests[0].url,
-      `https://124.221.69.228/api/firewall/${encodeURIComponent(token)}/add`,
+      `https://124.221.69.228/api/firewall/${encodeURIComponent(token)}`,
       `${client} did not deliver the configured token to the request URL`,
     );
     assert.equal(JSON.parse(run.store.get("po0_fw_last_auto_success")).trigger, "cron");
     assert.doesNotMatch(run.logs.join("\n"), new RegExp(token));
   }
+
+  const loonEvent = await runClient("loon", (context) => {
+    context.$script = { name: "po0-fw-event", startTime: Date.now() };
+  });
+  assert.equal(loonEvent.requests.length, 3, "Loon network-changed should run all stabilization rounds");
+  assert.ok(loonEvent.requests.every((request) => request.method === "GET"));
+  assert.equal(JSON.parse(loonEvent.store.get("po0_fw_last_auto_success")).trigger, "network-changed");
+
+  const stashTile = await runClient("stash", (context) => {
+    context.$script = { name: "po0-fw", type: "tile" };
+  });
+  assert.equal(stashTile.requests.length, 1);
+  assert.equal(stashTile.requests[0].method, "GET", "Stash tile refresh must be read-only");
+  assert.equal(stashTile.notifications.length, 0, "Stash tile refresh must be silent");
 
   console.log("proxy-client compatibility tests passed");
 })().catch((error) => {
