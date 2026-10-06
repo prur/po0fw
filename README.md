@@ -50,13 +50,15 @@ Surge / Loon / Stash / Quantumult X / Shadowrocket / Egern 六客户端脚本模
 [`f4986ab`](https://github.com/w0ven/po0fw/commit/f4986abefe2c0f5451aa819b386698668ef836f5)，
 并以 `baseline-upstream-f4986ab` 标签标记。因此无需额外复制一份仓库即可回退。
 
-- `network-changed` 与 `engine-started` 不再立即只请求一次：脚本先等待链路稳定，再进行三轮幂等确认，覆盖双 SIM 切换时“首次请求仍走旧出口”的竞态。
-- 三轮事件请求各自最多等待 8 秒、不做嵌套重试，最坏运行时间保持在模块的 60 秒预算内；cron、面板仍保留原有三次瞬时错误重试。
+- `network-changed` 与 `engine-started` 使用无 CAS 持久化存储实现 30 秒 best-effort 所有者租约，并在 100ms 后复读确认胜者；租约不在完成时清零，而是留到 TTL 过期，避免旧 owner 的非原子清理擦掉新 owner。服务端幂等和 GET-first 是并发下的最终防线。获胜会话再按 3 秒、5 秒、8 秒的间隔确认三轮，覆盖双 SIM 切换时的 IPv6-only、旧出口和新出口阶段。
+- 所有自动任务先只读 GET；只有当前来源 `/24` 缺失时才 POST `/add`。这避免一次系统切网风暴产生多组重复写入并撞服务端限频。
+- 事件 GET/POST 各自最多等待 5 秒、不做嵌套重试，最坏 46.1 秒；cron/button 单次最多 7 秒并保留三次瞬时错误重试，GET+POST 最坏 51 秒；auto-interval 只发一次 GET，均在模块 60 秒预算内。
 - Surge cron 启用 `wake-system=true`，使 iOS 空闲或 App 被挂起时仍可每 10 分钟兜底。
 - 增加 `engine-started` 触发器。该事件要求 **Surge iOS 5.22.0+ / Surge Mac 6.9.0+**；更旧版本应删除 `po0-fw-start` 行。
-- 脚本日志记录触发来源、轮次、接口、耗时和服务端回显 IP，但不记录 token 或含 token 的 URL；面板显示最近一次自动成功状态。
+- Surge 面板 `auto-interval` 与 Stash `tile` 刷新只读 GET；Surge 刷新按钮先 GET、仅在缺失时 POST。`update-interval=1` 让 Surge 每次重新进入策略页都读取最新状态，但不会在后台持续轮询，也不会跟随 event/cron 结果主动推送。
+- HTTP 非 2xx、嵌入式 `code>=400` 和成功响应字段缺失均会显示经过脱敏的真实错误，不再出现 `0/undefined`；日志记录触发来源、轮次、接口、耗时、HTTP/API 状态和回显 IP，但不记录 token 或完整 URL。
 - 使用共享 JavaScript 的五个客户端模块（Surge、Loon、Stash、Quantumult X、Shadowrocket）固定引用已审计脚本提交
-  [`ccc62ff`](https://github.com/prur/po0fw/commit/ccc62ffbb254f48227becf44c695e4830445e5a1)，不跟随可变的 `main`。
+  [`ae29f75`](https://github.com/prur/po0fw/commit/ae29f759f64c21b71ed9ea2bc0b326a7da7388ba)，不跟随可变的 `main`。
 
 回退脚本时可把 `script-path` 改为原始基线的不可变 URL：
 
