@@ -37,6 +37,8 @@ function runSurgeScript({
   storeReadError = null,
   storeWriteSucceeds = true,
   onDelay = null,
+  clock = { now: Date.now() },
+  scheduleTimer = null,
 }) {
   const posts = [];
   const gets = [];
@@ -51,7 +53,9 @@ function runSurgeScript({
 
     const context = {
       Promise,
-      Date,
+      Date: class extends Date {
+        static now() { return clock.now; }
+      },
       JSON,
       encodeURIComponent,
       decodeURIComponent,
@@ -65,7 +69,8 @@ function runSurgeScript({
       setTimeout(callback, ms) {
         delays.push(ms);
         if (onDelay) onDelay(ms, store);
-        queueMicrotask(callback);
+        if (scheduleTimer) scheduleTimer(callback, ms);
+        else queueMicrotask(() => { clock.now += ms; callback(); });
         return delays.length;
       },
       $argument: argument,
@@ -106,27 +111,33 @@ function runSurgeScript({
       },
       $httpClient: {
         post(options, callback) {
-          posts.push(options);
+          posts.push({ ...options, at: clock.now });
           const response = responses[Math.min(responseIndex, responses.length - 1)];
           responseIndex += 1;
           const metadata = response.missingStatus
             ? null
             : { status: response.status === undefined ? 200 : response.status };
-          queueMicrotask(() => callback(response.error || null, metadata, response.body));
+          queueMicrotask(() => {
+            clock.now += response.elapsedMs || 0;
+            callback(response.error || null, metadata, response.body);
+          });
         },
         get(options, callback) {
-          gets.push(options);
+          gets.push({ ...options, at: clock.now });
           const response = responses[Math.min(responseIndex, responses.length - 1)];
           responseIndex += 1;
           const metadata = response.missingStatus
             ? null
             : { status: response.status === undefined ? 200 : response.status };
-          queueMicrotask(() => callback(response.error || null, metadata, response.body));
+          queueMicrotask(() => {
+            clock.now += response.elapsedMs || 0;
+            callback(response.error || null, metadata, response.body);
+          });
         },
       },
       $done(result) {
         global.clearTimeout(watchdog);
-        resolve({ result, posts, gets, delays, logs, notifications, store });
+        resolve({ result, posts, gets, delays, logs, notifications, store, endedAt: clock.now });
       },
     };
 
@@ -151,7 +162,7 @@ async function testNetworkChangeAlwaysConfirmsThreeTimes() {
 
   assert.equal(run.gets.length, 3, "network change must confirm the exit three times even after success");
   assert.equal(run.posts.length, 0);
-  assert.deepEqual(run.delays, [100, 3000, 5000, 8000]);
+  assert.deepEqual(run.delays, [100, 3000, 5000, 24900]);
   assert.match(run.result.title, /203\.0\.113\.0\/24/);
   assert.equal(run.logs.length, 3, "each stabilization round should leave one diagnostic log line");
   assert.match(run.logs[0], /trigger=network-changed/);
@@ -182,7 +193,7 @@ async function testNetworkChangeReadsEveryRoundAndWritesOnlyWhenNeeded() {
 
   assert.equal(run.gets.length, 3);
   assert.equal(run.posts.length, 1, "only the newly observed network should require a write");
-  assert.deepEqual(run.delays, [100, 3000, 5000, 8000]);
+  assert.deepEqual(run.delays, [100, 3000, 5000, 24900]);
   assert.match(run.result.title, /203\.0\.113\.0\/24/);
 }
 
@@ -293,20 +304,96 @@ async function testOldOwnerDoesNotReleaseNewOwnerLease() {
 async function testEventWorstCaseBudgetStaysUnderModuleTimeout() {
   const oldIp = "198.51.100.0/24";
   const newIp = "203.0.113.0/24";
-  const responses = [];
-  for (let i = 0; i < 3; i += 1) {
-    responses.push({ body: stateBody(newIp, [oldIp]) });
-    responses.push({ body: stateBody(newIp, [oldIp, newIp]) });
+  for (const latency of [0, 2500, 5000]) {
+    for (const needsWrite of [false, true]) {
+      const clock = { now: 1760000000000 };
+      const startedAt = clock.now;
+      const responses = [];
+      for (let i = 0; i < 3; i += 1) {
+        responses.push({ body: stateBody(newIp, needsWrite ? [oldIp] : [oldIp, newIp]), elapsedMs: latency });
+        if (needsWrite) responses.push({ body: stateBody(newIp, [oldIp, newIp]), elapsedMs: latency });
+      }
+      const run = await runSurgeScript({ eventName: "network-changed", responses, clock });
+      assert.equal(run.gets.length, 3);
+      assert.equal(run.posts.length, needsWrite ? 3 : 0);
+      assert.ok(run.gets[2].at >= startedAt + 33000, "final GET covers lease expiry plus settling");
+      const elapsed = run.endedAt - startedAt;
+      assert.ok(elapsed <= 46100, `event took ${elapsed}ms`);
+      assert.ok(elapsed < 60000);
+      if (latency === 5000 && needsWrite) assert.equal(elapsed, 46100);
+      if (latency === 0) assert.equal(elapsed, 33000);
+    }
   }
-  const run = await runSurgeScript({ eventName: "network-changed", responses });
+}
 
-  assert.equal(run.gets.length, 3);
-  assert.equal(run.posts.length, 3);
-  const budgetMs =
-    run.delays.reduce((sum, ms) => sum + ms, 0) +
-    [...run.gets, ...run.posts].reduce((sum, request) => sum + request.timeout * 1000, 0);
-  assert.equal(budgetMs, 46100);
-  assert.ok(budgetMs < 60000);
+async function testSecondSwitchDuringLeaseIsObservedByLiveOwner() {
+  for (const switchAt of [20000, 29999]) {
+    const start = 1760000000000;
+    const clock = { now: start };
+    const sharedStore = new Map();
+    const timers = [];
+    const scheduleTimer = (callback, ms) => timers.push({ callback, at: clock.now + ms });
+    const oldIp = "198.51.100.0/24";
+    const newIp = "203.0.113.0/24";
+    let ownerDone = false;
+    let follower;
+    const owner = runSurgeScript({
+      eventName: "network-changed", sessionID: "OWNER", clock, sharedStore, scheduleTimer,
+      responses: [
+        { body: successBody(oldIp) }, { body: successBody(oldIp) },
+        { body: stateBody(newIp, [oldIp]) }, { body: successBody(newIp) },
+      ],
+    }).then((run) => { ownerDone = true; return run; });
+    scheduleTimer(() => {
+      assert.equal(ownerDone, false, "the coalesced event must still have a live owner");
+      follower = runSurgeScript({
+        eventName: "network-changed", sessionID: "FOLLOWER", clock, sharedStore, scheduleTimer,
+        responses: [{ body: successBody(newIp) }],
+      });
+    }, switchAt);
+    // Drain promise chains before advancing to the next virtual timer. No real network or sleeps.
+    while (!ownerDone) {
+      for (let i = 0; i < 50; i += 1) await Promise.resolve();
+      if (ownerDone) break;
+      timers.sort((a, b) => a.at - b.at);
+      assert.ok(timers.length, "expected an outstanding owner timer");
+      const timer = timers.shift();
+      clock.now = timer.at;
+      timer.callback();
+    }
+    const run = await owner;
+    const coalesced = await follower;
+    assert.equal(coalesced.gets.length, 0);
+    assert.equal(coalesced.posts.length, 0);
+    assert.equal(run.gets[2].at, start + 33000);
+    assert.equal(run.posts.length, 1, "the owner whitelists the second switch");
+    assert.match(run.result.title, /203\.0\.113\.0\/24/);
+  }
+}
+
+async function testExpiredLeaseAllowsNewOwnerAndCannotExtendOldDeadline() {
+  const start = 1760000000000;
+  const clock = { now: start };
+  let replaced = false;
+  const run = await runSurgeScript({
+    eventName: "network-changed", sessionID: "OLD", clock,
+    onDelay(ms, store) {
+      if (ms === 5000 && !replaced) {
+        replaced = true;
+        store.set("po0_fw_event_lease", JSON.stringify({ ts: start + 30000, owner: "NEW" }));
+      }
+    },
+    responses: [{ body: successBody("198.51.100.0/24") }],
+  });
+  assert.equal(run.endedAt, start + 33000, "a successor must not extend the old owner's deadline");
+  assert.equal(JSON.parse(run.store.get("po0_fw_event_lease")).owner, "NEW");
+  const next = await runSurgeScript({
+    eventName: "network-changed", sessionID: "NEXT", clock: { now: start + 30000 },
+    initialStore: { po0_fw_event_lease: JSON.stringify({ ts: start, owner: "OLD" }) },
+    responses: [{ body: successBody("203.0.113.0/24") }],
+  });
+  assert.equal(next.gets.length, 3, "exactly at TTL, a genuine event may acquire a new lease");
+  assert.equal(JSON.parse(next.store.get("po0_fw_event_lease")).owner, "NEXT");
 }
 
 async function testNetworkChangeUsesBoundedIndependentAttempts() {
@@ -326,7 +413,7 @@ async function testNetworkChangeUsesBoundedIndependentAttempts() {
     [5, 5, 5],
     "each Surge event request must have a five-second cap",
   );
-  assert.deepEqual(run.delays, [100, 3000, 5000, 8000]);
+  assert.deepEqual(run.delays, [100, 3000, 5000, 24900]);
   assert.match(run.result.title, /po0 加白 0\/1/);
   assert.equal(run.store.has("po0_fw_last_auto_success"), false);
 }
@@ -385,7 +472,7 @@ async function testEngineStartUsesTheSameStabilizationPlan() {
 
   assert.equal(run.gets.length, 3);
   assert.equal(run.posts.length, 0);
-  assert.deepEqual(run.delays, [100, 3000, 5000, 8000]);
+  assert.deepEqual(run.delays, [100, 3000, 5000, 24900]);
   assert.deepEqual(run.gets.map((request) => request.timeout), [5, 5, 5]);
 }
 
@@ -838,6 +925,8 @@ async function testPanelShowsLastAutomaticSuccessWithoutReplacingIt() {
   await testStaleLeaseCanBeTakenOver();
   await testOldOwnerDoesNotReleaseNewOwnerLease();
   await testEventWorstCaseBudgetStaysUnderModuleTimeout();
+  await testSecondSwitchDuringLeaseIsObservedByLiveOwner();
+  await testExpiredLeaseAllowsNewOwnerAndCannotExtendOldDeadline();
   await testNetworkChangeUsesBoundedIndependentAttempts();
   await testFinalRoundFailureIsNotReportedAsAutomaticSuccess();
   await testMultipleTokensAreConfirmedInEveryRound();

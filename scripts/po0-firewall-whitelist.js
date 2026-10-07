@@ -18,8 +18,8 @@
  * - network-changed / engine-started 先用无 CAS 持久化存储做 30 秒 best-effort 所有者租约，
  *   并等待 100ms 复读确认写入胜者；记录不在完成时清零，而是留到 TTL 过期，避免
  *   旧 owner 的非原子清理擦掉新 owner。服务端幂等与 GET-first 仍是并发下的最终防线。
- *   获胜会话再按 3s、5s、8s 的间隔确认三次，覆盖双 SIM 切换期间
- *   IPv6-only / 旧出口 / 新出口三个阶段。
+ *   获胜会话按至少 3s、5s、8s 的间隔确认三次；最后一轮不早于原租约到期后
+ *   3 秒，覆盖整个合并窗口并为窗口末尾的切网留出稳定时间。
  * - 事件路径单次 GET/POST 最多等 5 秒且不做嵌套重试，GET+POST 的最坏总运行
  *   约 46.1 秒，保持在模块 timeout=60 的预算内；cron / button 单次最多 7 秒并保留
  *   三次瞬时错误重试，GET+POST 的最坏总运行 51 秒；auto-interval 只发一次 GET。
@@ -50,6 +50,7 @@ var LAST_SUCCESS_KEY = "po0_fw_last_auto_success";
 var EVENT_LEASE_KEY = "po0_fw_event_lease";
 var EVENT_COALESCE_MS = 30000;
 var EVENT_LEASE_SETTLE_MS = 100;
+var EVENT_FINAL_SETTLE_MS = 3000;
 var HIST_WINDOW_MS = 24 * 3600 * 1000; // 📶 标记的记账窗口
 
 /* ---------- 环境兼容层 ---------- */
@@ -315,7 +316,7 @@ function prepareEventLease(name) {
   return delay(EVENT_LEASE_SETTLE_MS).then(function () {
     var confirmed = readEventLease();
     if (confirmed.owner !== owner) return { coalesced: true, owner: "", unavailable: false };
-    return { coalesced: false, owner: owner, unavailable: false };
+    return { coalesced: false, owner: owner, unavailable: false, expiresAt: now + EVENT_COALESCE_MS };
   });
 }
 
@@ -759,7 +760,7 @@ function runEnsureRound(requestOptions, attempt, total) {
   });
 }
 
-function runEnsurePlan() {
+function runEnsurePlan(lease) {
   var needsStabilization = triggerName === "network-changed" || triggerName === "engine-started";
   if (!needsStabilization) {
     var regularOptions = null;
@@ -778,6 +779,12 @@ function runEnsurePlan() {
   var sequence = Promise.resolve(null);
   STABILIZATION_DELAYS_MS.forEach(function (waitMs, index) {
     sequence = sequence.then(function () {
+      // Use this owner's immutable deadline, never a successor's lease. Fast requests
+      // must not end monitoring while later network events are still coalesced.
+      // Keep 3s of settling time for an event just before the lease expires.
+      if (index === STABILIZATION_DELAYS_MS.length - 1 && lease && lease.expiresAt) {
+        waitMs = Math.max(waitMs, lease.expiresAt + EVENT_FINAL_SETTLE_MS - Date.now());
+      }
       return delay(waitMs).then(function () {
         return runEnsureRound(eventRequestOptions, index + 1, STABILIZATION_DELAYS_MS.length);
       });
@@ -867,7 +874,7 @@ Promise.resolve()
       finish("po0 加白：已合并重复网络事件", "已有稳定窗口任务正在确认当前出口", true);
       return null;
     }
-    return runEnsurePlan();
+    return runEnsurePlan(lease);
   })
   .then(function (results) {
     if (results !== null) completeRun(results);
