@@ -15,14 +15,15 @@
  *
  * 策略：
  * - 所有自动任务先 GET；只有当前来源 /24 缺失时才 POST，避免重复写入撞限频。
- * - network-changed / engine-started 先用无 CAS 持久化存储做 30 秒 best-effort 所有者租约，
+ * - network-changed / engine-started 先用无 CAS 持久化存储做 8 秒 best-effort 所有者租约，
  *   并等待 100ms 复读确认写入胜者；记录不在完成时清零，而是留到 TTL 过期，避免
- *   旧 owner 的非原子清理擦掉新 owner。服务端幂等与 GET-first 仍是并发下的最终防线。
- *   获胜会话按至少 3s、5s、8s 的间隔确认三次；最后一轮不早于原租约到期后
- *   3 秒，覆盖整个合并窗口并为窗口末尾的切网留出稳定时间。
- * - 事件路径单次 GET/POST 最多等 5 秒且不做嵌套重试，GET+POST 的最坏总运行
- *   约 46.1 秒，保持在模块 timeout=60 的预算内；cron / button 单次最多 7 秒并保留
- *   三次瞬时错误重试，GET+POST 的最坏总运行 51 秒；auto-interval 只发一次 GET。
+ *   旧 owner 的非原子清理擦掉新 owner。8 秒只吞掉立即重复触发；更晚的真实切网会
+ *   获得自己的完整确认计划。服务端幂等与 GET-first 仍是并发下的最终防线。
+ *   获胜会话以计划起点后的 3s、8s、16s 为确认点；慢请求不再叠加额外等待。
+ * - 事件路径单次 GET/POST 最多等 5 秒且不做嵌套重试，名义最坏约 33.1 秒；
+ *   50 秒绝对执行预算会在剩余时间不足一轮时 fail-closed，保持在模块 timeout=60 内。
+ *   cron / button 单次最多 7 秒并保留三次瞬时错误重试，GET+POST 最坏总运行 51 秒；
+ *   auto-interval 只发一次 GET。
  * - 面板 auto-interval 只做 GET；button 先 GET，缺失时才 POST，因此查看状态不会写白名单。
  * - 默认 slotless 写入：新 /24 在满额时按 FIFO 淘汰最旧普通记录；重复 /24
  *   服务端幂等，不重复占坑，也不推进淘汰队列。
@@ -48,9 +49,10 @@ var STORE_PREFIX = "po0_fw_";
 var TOKENS_KEY = "po0fw_tokens";
 var LAST_SUCCESS_KEY = "po0_fw_last_auto_success";
 var EVENT_LEASE_KEY = "po0_fw_event_lease";
-var EVENT_COALESCE_MS = 30000;
+var EVENT_COALESCE_MS = 8000;
 var EVENT_LEASE_SETTLE_MS = 100;
-var EVENT_FINAL_SETTLE_MS = 3000;
+var EVENT_EXECUTION_BUDGET_MS = 50000;
+var EVENT_ROUND_BUDGET_MS = 11000;
 var HIST_WINDOW_MS = 24 * 3600 * 1000; // 📶 标记的记账窗口
 
 /* ---------- 环境兼容层 ---------- */
@@ -98,6 +100,23 @@ function storeWrite(value, key) {
   if (isQX) return $prefs.setValueForKey(value, key);
   if (typeof $persistentStore !== "undefined") return $persistentStore.write(value, key);
   return false;
+}
+
+function optionalStoreRead(key, fallbackValue) {
+  try {
+    var value = storeRead(key);
+    return value === null || value === undefined ? fallbackValue : value;
+  } catch (e) {
+    return fallbackValue;
+  }
+}
+
+function optionalStoreWrite(value, key) {
+  try {
+    return storeWrite(value, key) === true;
+  } catch (e) {
+    return false;
+  }
 }
 
 function notify(title, subtitle, body) {
@@ -276,7 +295,12 @@ function isAutomaticTrigger(name) {
 }
 
 function readEventLease() {
-  var raw = storeRead(EVENT_LEASE_KEY) || "";
+  var raw = "";
+  try {
+    raw = storeRead(EVENT_LEASE_KEY) || "";
+  } catch (e) {
+    return { ts: 0, owner: "", error: sanitizeLogText(e && e.message ? e.message : e) || "store read failed" };
+  }
   try {
     var parsed = JSON.parse(raw);
     if (typeof parsed === "number") return { ts: parsed, owner: "legacy" };
@@ -288,6 +312,19 @@ function readEventLease() {
   return { ts: legacy, owner: legacy > 0 ? "legacy" : "" };
 }
 
+function unavailableEventLease(name, now) {
+  if (typeof console !== "undefined" && typeof console.log === "function") {
+    console.log("[po0fw] trigger=" + name + " lease=unavailable action=fail-open");
+  }
+  return {
+    coalesced: false,
+    owner: "",
+    unavailable: true,
+    startedAt: now,
+    deadlineAt: now + EVENT_EXECUTION_BUDGET_MS,
+  };
+}
+
 function prepareEventLease(name) {
   if (name !== "network-changed" && name !== "engine-started") {
     return Promise.resolve({ coalesced: false, owner: "", unavailable: false });
@@ -295,6 +332,7 @@ function prepareEventLease(name) {
 
   var now = Date.now();
   var previous = readEventLease();
+  if (previous.error) return Promise.resolve(unavailableEventLease(name, now));
   if (previous.ts > 0 && now - previous.ts >= 0 && now - previous.ts < EVENT_COALESCE_MS) {
     return Promise.resolve({ coalesced: true, owner: "", unavailable: false });
   }
@@ -304,19 +342,26 @@ function prepareEventLease(name) {
     if (typeof $script !== "undefined" && $script && $script.sessionID) owner = String($script.sessionID);
   } catch (e) {}
 
-  var wrote = storeWrite(JSON.stringify({ ts: now, owner: owner }), EVENT_LEASE_KEY);
-  if (!wrote) {
-    if (typeof console !== "undefined" && typeof console.log === "function") {
-      console.log("[po0fw] trigger=" + name + " lease=unavailable action=fail-open");
-    }
-    return Promise.resolve({ coalesced: false, owner: "", unavailable: true });
+  var wrote = false;
+  try {
+    wrote = storeWrite(JSON.stringify({ ts: now, owner: owner }), EVENT_LEASE_KEY);
+  } catch (e) {
+    return Promise.resolve(unavailableEventLease(name, now));
   }
+  if (!wrote) return Promise.resolve(unavailableEventLease(name, now));
 
   // 持久化存储没有 CAS；短暂让并发会话完成写入，再由最后保留的 owner 胜出。
   return delay(EVENT_LEASE_SETTLE_MS).then(function () {
     var confirmed = readEventLease();
+    if (confirmed.error) return unavailableEventLease(name, now);
     if (confirmed.owner !== owner) return { coalesced: true, owner: "", unavailable: false };
-    return { coalesced: false, owner: owner, unavailable: false, expiresAt: now + EVENT_COALESCE_MS };
+    return {
+      coalesced: false,
+      owner: owner,
+      unavailable: false,
+      startedAt: now,
+      deadlineAt: now + EVENT_EXECUTION_BUDGET_MS,
+    };
   });
 }
 
@@ -651,7 +696,7 @@ function ensureWhitelisted(item, index, requestOptions) {
       var last = hist.length ? hist[hist.length - 1] : null;
       if (!last || last.ip !== st.currentIp) {
         hist.push({ ip: st.currentIp, src: cellular ? "cell" : "fixed", ts: Date.now() });
-        storeWrite(JSON.stringify(hist.slice(-10)), kvHist);
+        optionalStoreWrite(JSON.stringify(hist.slice(-10)), kvHist);
       }
     }
     ctx.st = st;
@@ -746,7 +791,7 @@ try {
 } catch (e) {
   if (isPanelInvocation()) triggerName = "auto-interval";
 }
-var STABILIZATION_DELAYS_MS = [3000, 5000, 8000];
+var STABILIZATION_OFFSETS_MS = [3000, 8000, 16000];
 
 function runEnsureRound(requestOptions, attempt, total) {
   var startedAt = Date.now();
@@ -776,18 +821,22 @@ function runEnsurePlan(lease) {
   }
 
   var eventRequestOptions = { maxAttempts: 1, timeout: timeoutValue(5), preflight: true };
+  var scheduleStartedAt = Date.now();
+  var deadlineAt = lease && lease.deadlineAt ? lease.deadlineAt : scheduleStartedAt + EVENT_EXECUTION_BUDGET_MS;
   var sequence = Promise.resolve(null);
-  STABILIZATION_DELAYS_MS.forEach(function (waitMs, index) {
+  STABILIZATION_OFFSETS_MS.forEach(function (offsetMs, index) {
     sequence = sequence.then(function () {
-      // Use this owner's immutable deadline, never a successor's lease. Fast requests
-      // must not end monitoring while later network events are still coalesced.
-      // Keep 3s of settling time for an event just before the lease expires.
-      if (index === STABILIZATION_DELAYS_MS.length - 1 && lease && lease.expiresAt) {
-        waitMs = Math.max(waitMs, lease.expiresAt + EVENT_FINAL_SETTLE_MS - Date.now());
+      var waitMs = Math.max(0, scheduleStartedAt + offsetMs - Date.now());
+      if (deadlineAt - Date.now() < waitMs + EVENT_ROUND_BUDGET_MS) {
+        throw new Error("event execution budget exhausted before confirmation round");
       }
-      return delay(waitMs).then(function () {
-        return runEnsureRound(eventRequestOptions, index + 1, STABILIZATION_DELAYS_MS.length);
-      });
+      var runRound = function () {
+        if (deadlineAt - Date.now() < EVENT_ROUND_BUDGET_MS) {
+          throw new Error("event execution budget exhausted before confirmation round");
+        }
+        return runEnsureRound(eventRequestOptions, index + 1, STABILIZATION_OFFSETS_MS.length);
+      };
+      return waitMs > 0 ? delay(waitMs).then(runRound) : runRound();
     });
   });
   return sequence;
@@ -806,15 +855,15 @@ function completeRun(results) {
     lines.push(describe(i, results[i]));
 
     var state = (st.currentIp || "?") + "|" + (st.ready ? "1" : "0");
-    if (storeRead(results[i].kvState) !== state) {
-      storeWrite(state, results[i].kvState);
+    if (optionalStoreRead(results[i].kvState, null) !== state) {
+      optionalStoreWrite(state, results[i].kvState);
       changed = true;
     }
   }
 
   var allOk = okCount === results.length;
   if (allOk && isAutomaticTrigger(triggerName)) {
-    storeWrite(
+    optionalStoreWrite(
       JSON.stringify({
         ts: Date.now(),
         trigger: triggerName,
