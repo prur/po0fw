@@ -24,23 +24,29 @@ Token 在 po0 控制台机器详情页「防火墙」卡片获取，形如 `pgnf
 | OpenWrt / Kwrt 软路由 | 本仓库 shell 脚本 | cron + hotplug WAN 重连秒级触发 |
 | Windows | 本仓库 PowerShell | 计划任务：10 分钟 + 网络事件 |
 | 安卓 | [android/](android/)：MacroDroid / HTTP Shortcuts / Termux | 网络切换 + 定时 |
-| iOS/Mac 代理客户端 | 本仓库脚本模块：Surge / Loon / Stash / QX / Shadowrocket / Egern（[一键安装页](https://po0fw.uuuz.de/)） | network-changed 即时 + 10 分钟 cron |
+| iOS/Mac 代理客户端 | 本仓库脚本模块：Surge / Loon / Stash / QX / Shadowrocket / Egern（本 fork 安装链接见下表） | network-changed 即时 + 10 分钟 cron |
 | iOS 无代理 App | [ios/](ios/)：快捷指令自动化 | Wi-Fi 切换触发 |
 
 ## iOS / Mac 代理客户端模块
 
-Surge / Loon / Stash / Quantumult X / Shadowrocket / Egern 六客户端脚本模块（共享环境兼容层），带面板显示、蜂窝 📶 标记、network-changed 即时触发 + 每 10 分钟 cron 兜底：
+Surge / Loon / Stash / Quantumult X / Shadowrocket / Egern 六客户端模块（前五种共享环境兼容层，Egern 使用独立原生脚本），带面板显示、蜂窝 📶 标记、network-changed 即时触发 + 每 10 分钟 cron 兜底：
 
-👉 **一键安装页：<https://po0fw.uuuz.de/>**
+### 本 fork 的安装入口
 
-| 客户端 | 载体 | token 配置 |
+从下表复制对应的 **模块 URL**，在客户端内「从 URL 安装 / 导入」；Quantumult X 请打开片段后复制到 `[task_local]`。模块文件来自 `prur/po0fw/main`，其中五个共享 JavaScript 客户端会继续使用下文列出的不可变脚本提交。
+
+无需部署 GitHub Pages：下载本仓库后，可在浏览器打开 `docs/index.html` 使用交互安装页；也可直接使用下表链接。安装后仍需按客户端说明填写 token，模块链接不会包含 token。
+
+> 本 fork 基于 [w0ven/po0fw](https://github.com/w0ven/po0fw)。[上游原版安装页](https://po0fw.uuuz.de/) 分发上游模块，不包含本 fork 的修复。Egern 使用独立的原生脚本，不属于本 fork 的共享 JavaScript 修复范围。
+
+| 客户端 | 本 fork 安装链接 | token 配置 |
 |---|---|---|
-| Surge | `surge/po0-firewall-whitelist.sgmodule` | 模块参数 `tokens` |
-| Loon | `loon/po0-firewall-whitelist.plugin` | 插件设置 `API tokens` |
-| Stash | `stash/po0-firewall-whitelist.stoverride` | 覆写内 `argument: tokens=` |
-| Quantumult X | `quantumultx/po0-firewall-whitelist.snippet` | BoxJs key `po0fw_tokens` 或脚本内 `INLINE_TOKENS` |
-| Shadowrocket | `shadowrocket/po0-firewall-whitelist.srmodule` | 模块编辑参数（多 token 用 `\|` 分割） |
-| Egern | `egern/po0-firewall-whitelist.yaml` | 模块参数 `tokens` |
+| Surge | [模块 URL](https://raw.githubusercontent.com/prur/po0fw/main/surge/po0-firewall-whitelist.sgmodule) | 模块参数 `tokens` |
+| Loon | [模块 URL](https://raw.githubusercontent.com/prur/po0fw/main/loon/po0-firewall-whitelist.plugin) | 插件设置 `API tokens` |
+| Stash | [模块 URL](https://raw.githubusercontent.com/prur/po0fw/main/stash/po0-firewall-whitelist.stoverride) | 覆写内 `argument: tokens=` |
+| Quantumult X | [模块 URL](https://raw.githubusercontent.com/prur/po0fw/main/quantumultx/po0-firewall-whitelist.snippet) | BoxJs key `po0fw_tokens` 或脚本内 `INLINE_TOKENS` |
+| Shadowrocket | [模块 URL](https://raw.githubusercontent.com/prur/po0fw/main/shadowrocket/po0-firewall-whitelist.srmodule) | 模块编辑参数（多 token 用 `\|` 分割） |
+| Egern | [模块 URL](https://raw.githubusercontent.com/prur/po0fw/main/egern/po0-firewall-whitelist.yaml) | 模块参数 `tokens` |
 
 > 模块部分借鉴自 [reallinzc/po0fw](https://github.com/reallinzc/po0fw)，感谢原作者。
 
@@ -50,7 +56,7 @@ Surge / Loon / Stash / Quantumult X / Shadowrocket / Egern 六客户端脚本模
 [`f4986ab`](https://github.com/w0ven/po0fw/commit/f4986abefe2c0f5451aa819b386698668ef836f5)，
 并以 `baseline-upstream-f4986ab` 标签标记。因此无需额外复制一份仓库即可回退。
 
-- `network-changed` 与 `engine-started` 使用无 CAS 持久化存储实现 30 秒 best-effort 所有者租约，并在 100ms 后复读确认胜者；租约不在完成时清零，而是留到 TTL 过期，避免旧 owner 的非原子清理擦掉新 owner。服务端幂等和 GET-first 是并发下的最终防线。获胜会话再按 3 秒、5 秒、8 秒的间隔确认三轮，覆盖双 SIM 切换时的 IPv6-only、旧出口和新出口阶段。
+- `network-changed` 与 `engine-started` 使用无 CAS 持久化存储实现 30 秒 best-effort 所有者租约，并在 100ms 后复读确认胜者；租约不在完成时清零，而是留到 TTL 过期，避免旧 owner 的非原子清理擦掉新 owner。服务端幂等和 GET-first 是并发下的最终防线。获胜会话按至少 3 秒、5 秒、8 秒的间隔确认三轮，最后一轮延迟到原租约到期后至少 3 秒，覆盖整个合并窗口及窗口末尾切网的稳定时间。快速响应时约 33 秒结束，避免任务已结束却仍吞掉后续切网事件；不会读取新 owner 的租约来延长旧任务，也不会清除新 owner 的记录。
 - 所有自动任务先只读 GET；只有当前来源 `/24` 缺失时才 POST `/add`。这避免一次系统切网风暴产生多组重复写入并撞服务端限频。
 - 事件 GET/POST 各自最多等待 5 秒、不做嵌套重试，最坏 46.1 秒；cron/button 单次最多 7 秒并保留三次瞬时错误重试，GET+POST 最坏 51 秒；auto-interval 只发一次 GET，均在模块 60 秒预算内。
 - Surge cron 启用 `wake-system=true`，使 iOS 空闲或 App 被挂起时仍可每 10 分钟兜底。
@@ -58,7 +64,7 @@ Surge / Loon / Stash / Quantumult X / Shadowrocket / Egern 六客户端脚本模
 - Surge 面板 `auto-interval` 与 Stash `tile` 刷新只读 GET；Surge 刷新按钮先 GET、仅在缺失时 POST。`update-interval=1` 让 Surge 每次重新进入策略页都读取最新状态，但不会在后台持续轮询，也不会跟随 event/cron 结果主动推送。
 - HTTP 非 2xx、嵌入式 `code>=400` 和成功响应字段缺失均会显示经过脱敏的真实错误，不再出现 `0/undefined`；日志记录触发来源、轮次、接口、耗时、HTTP/API 状态和回显 IP，但不记录 token 或完整 URL。
 - 使用共享 JavaScript 的五个客户端模块（Surge、Loon、Stash、Quantumult X、Shadowrocket）固定引用已审计脚本提交
-  [`ae29f75`](https://github.com/prur/po0fw/commit/ae29f759f64c21b71ed9ea2bc0b326a7da7388ba)，不跟随可变的 `main`。
+  [`a4dffea`](https://github.com/prur/po0fw/commit/a4dffeada04afa4055d7d5c4a66c65dc0c061e49)，不跟随可变的 `main`。
 
 回退脚本时可把 `script-path` 改为原始基线的不可变 URL：
 
@@ -71,7 +77,7 @@ https://raw.githubusercontent.com/w0ven/po0fw/f4986abefe2c0f5451aa819b386698668e
 ### Linux / macOS / 安卓 Termux
 
 ```sh
-curl -sSL https://raw.githubusercontent.com/w0ven/po0fw/main/install-linux.sh | PO0FW_TOKENS="pgnfw_你的token" sh
+curl -sSL https://raw.githubusercontent.com/prur/po0fw/main/install-linux.sh | PO0FW_TOKENS="pgnfw_你的token" sh
 ```
 
 - Linux(root)：装为 systemd timer（`po0fw.timer`，每 10 分钟）
@@ -81,7 +87,7 @@ curl -sSL https://raw.githubusercontent.com/w0ven/po0fw/main/install-linux.sh | 
 ### OpenWrt / Kwrt 软路由
 
 ```sh
-curl -sSL https://raw.githubusercontent.com/w0ven/po0fw/main/openwrt/install-openwrt.sh -o /tmp/i.sh
+curl -sSL https://raw.githubusercontent.com/prur/po0fw/main/openwrt/install-openwrt.sh -o /tmp/i.sh
 PO0FW_TOKENS="pgnfw_你的token" sh /tmp/i.sh
 ```
 
@@ -92,7 +98,7 @@ PO0FW_TOKENS="pgnfw_你的token" sh /tmp/i.sh
 管理员 PowerShell：
 
 ```powershell
-irm https://raw.githubusercontent.com/w0ven/po0fw/main/windows/install-windows.ps1 -OutFile i.ps1
+irm https://raw.githubusercontent.com/prur/po0fw/main/windows/install-windows.ps1 -OutFile i.ps1
 powershell -ExecutionPolicy Bypass -File i.ps1 -Tokens "pgnfw_你的token"
 ```
 

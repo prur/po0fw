@@ -9,10 +9,18 @@ on:
       - "stash/po0-firewall-whitelist.stoverride"
       - "quantumultx/po0-firewall-whitelist.snippet"
       - "shadowrocket/po0-firewall-whitelist.srmodule"
+      - "egern/po0-firewall-whitelist.yaml"
       - "tests/test-po0-firewall-whitelist.js"
       - "tests/test-client-compatibility.js"
       - "tests/test-pinned-script-references.js"
       - "tests/test-surge-module.js"
+      - "tests/test-distribution-routes.js"
+      - "README.md"
+      - "android/README.md"
+      - "docs/index.html"
+      - "install-linux.sh"
+      - "openwrt/install-openwrt.sh"
+      - "windows/install-windows.ps1"
       - ".github/workflows/javascript.yml"
   pull_request:
     paths:
@@ -22,10 +30,18 @@ on:
       - "stash/po0-firewall-whitelist.stoverride"
       - "quantumultx/po0-firewall-whitelist.snippet"
       - "shadowrocket/po0-firewall-whitelist.srmodule"
+      - "egern/po0-firewall-whitelist.yaml"
       - "tests/test-po0-firewall-whitelist.js"
       - "tests/test-client-compatibility.js"
       - "tests/test-pinned-script-references.js"
       - "tests/test-surge-module.js"
+      - "tests/test-distribution-routes.js"
+      - "README.md"
+      - "android/README.md"
+      - "docs/index.html"
+      - "install-linux.sh"
+      - "openwrt/install-openwrt.sh"
+      - "windows/install-windows.ps1"
       - ".github/workflows/javascript.yml"
 
 permissions:
@@ -55,3 +71,5 @@ jobs:
         run: node tests/test-pinned-script-references.js
       - name: Validate Surge module
         run: node tests/test-surge-module.js
+      - name: Verify fork distribution routes
+        run: node tests/test-distribution-routes.js
