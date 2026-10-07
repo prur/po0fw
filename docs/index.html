@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>po0fw — po0 防火墙自动加白</title>
+<title>po0fw — prur fork 安装页</title>
 <meta name="description" content="po0 防火墙白名单自动加白，覆盖软路由 / PC / 安卓 / iOS 全平台，一次配置永久生效">
 <style>
 :root{
@@ -186,7 +186,7 @@ footer a{color:var(--ink2)}
       <a href="#preview">效果</a>
       <a href="#faq">FAQ</a>
     </div>
-    <a class="gh" href="https://github.com/w0ven/po0fw">GitHub ↗</a>
+    <a class="gh" href="https://github.com/prur/po0fw">Fork GitHub ↗</a>
   </div>
 </nav>
 
@@ -226,12 +226,13 @@ footer a{color:var(--ink2)}
 <section class="alt" id="install">
   <div class="wrap">
     <div class="eyebrow">Get started</div>
-    <h2>安装</h2>
+    <h2>安装 prur/po0fw fork</h2>
+    <p class="desc">本页从 <a href="https://github.com/prur/po0fw">prur/po0fw</a> 获取安装文件，下载本仓库后可直接在浏览器打开本页，无需 GitHub Pages。上游项目与教程见页尾。</p>
     <p class="desc">token 在 po0 控制台机器详情页「防火墙」卡片 →「复制添加脚本」里，<code>pgnfw_</code> 开头那串。一台机器一个 token，请勿公开分享。</p>
 
     <div class="tokenwrap">
       <div class="tt">🔑 先粘贴你的 token</div>
-      <div class="td">本页所有安装命令和模块链接会自动带上它，复制即用。只保存在你的浏览器里，不会上传。</div>
+      <div class="td">本页安装命令会自动带上它；客户端模块安装后仍需手动填入 token。仅在浏览器允许时保存在本地，不会添加到模块链接中。</div>
       <div class="tokenrow">
         <input id="tok" type="text" placeholder="pgnfw_××××××××" autocomplete="off" spellcheck="false">
         <span class="state" id="tokState">未填写，命令中显示占位符</span>
@@ -260,7 +261,7 @@ footer a{color:var(--ink2)}
     <!-- 软路由 -->
     <div class="pane on" id="pane-router">
       <div class="stepline"><span class="no">1</span><h3>SSH 登录路由器，执行安装命令</h3></div>
-      <div class="cb"><button class="cp">复制</button><pre>curl -sSL https://raw.githubusercontent.com/w0ven/po0fw/main/openwrt/install-openwrt.sh -o /tmp/i.sh
+      <div class="cb"><button class="cp">复制</button><pre>curl -sSL https://raw.githubusercontent.com/prur/po0fw/main/openwrt/install-openwrt.sh -o /tmp/i.sh
 PO0FW_TOKENS="<span class="tk" data-t>pgnfw_你的token</span>" sh /tmp/i.sh</pre></div>
       <div class="stepline"><span class="no">2</span><h3>完成 —— 已自动配置双触发</h3></div>
       <div class="stepbody">cron 每 10 分钟兜底 + WAN 拨号/重连事件<b>秒级</b>加白。跑一次 <code>po0fw</code> 验证，日志在 <code>/tmp/po0fw.log</code>。</div>
@@ -270,10 +271,10 @@ PO0FW_TOKENS="<span class="tk" data-t>pgnfw_你的token</span>" sh /tmp/i.sh</pr
     <!-- PC -->
     <div class="pane" id="pane-pc">
       <div class="stepline"><span class="no">1</span><h3>Linux / macOS —— 一条命令</h3></div>
-      <div class="cb"><button class="cp">复制</button><pre>curl -sSL https://raw.githubusercontent.com/w0ven/po0fw/main/install-linux.sh | PO0FW_TOKENS="<span class="tk" data-t>pgnfw_你的token</span>" sh</pre></div>
+      <div class="cb"><button class="cp">复制</button><pre>curl -sSL https://raw.githubusercontent.com/prur/po0fw/main/install-linux.sh | PO0FW_TOKENS="<span class="tk" data-t>pgnfw_你的token</span>" sh</pre></div>
       <div class="stepbody">root 自动注册 systemd timer；macOS / 非 root 写入 crontab，均为每 10 分钟。</div>
       <div class="stepline"><span class="no">2</span><h3>Windows —— 管理员 PowerShell</h3></div>
-      <div class="cb"><button class="cp">复制</button><pre>irm https://raw.githubusercontent.com/w0ven/po0fw/main/windows/install-windows.ps1 -OutFile i.ps1
+      <div class="cb"><button class="cp">复制</button><pre>irm https://raw.githubusercontent.com/prur/po0fw/main/windows/install-windows.ps1 -OutFile i.ps1
 powershell -ExecutionPolicy Bypass -File i.ps1 -Tokens "<span class="tk" data-t>pgnfw_你的token</span>"</pre></div>
       <div class="stepbody">注册计划任务：每 10 分钟 + 网络连接事件双触发。</div>
       <div class="note"><b>常用命令：</b><code>po0fw</code> 立即加白 · <code>po0fw status</code> 查看白名单 · 改 token 编辑 <code>/etc/po0fw.conf</code>（Windows 为 <code>%ProgramData%\po0fw\po0fw.conf</code>）。</div>
@@ -296,7 +297,7 @@ powershell -ExecutionPolicy Bypass -File i.ps1 -Tokens "<span class="tk" data-t>
     <!-- iOS -->
     <div class="pane" id="pane-ios">
       <div class="stepline"><span class="no">1</span><h3>选择你的客户端，一键安装模块</h3></div>
-      <div class="stepbody" style="margin-bottom:16px">模块带面板显示、蜂窝 📶 标记、切网即时触发 + 每 10 分钟 cron。上方填过 token 的话，安装链接已自动带上参数。</div>
+      <div class="stepbody" style="margin-bottom:16px">模块链接来自本 fork；Surge / Loon / Stash / Shadowrocket / Quantumult X 使用固定提交的共享脚本，Egern 保留独立原生脚本。安装后请按卡片说明填写 token。</div>
       <div class="cards">
         <div class="card">
           <div class="hd"><img src="icons/surge.png" alt="Surge"><div><div class="nm">Surge</div><div class="ct">iOS / Mac · sgmodule</div></div></div>
@@ -393,7 +394,7 @@ powershell -ExecutionPolicy Bypass -File i.ps1 -Tokens "<span class="tk" data-t>
       <details><summary>固定槽位 @N 是什么？什么时候用？</summary><div class="bd">默认坑满按写入时间先进先出淘汰。家宽出口这种全家依赖的网段被挤掉几分钟都难受 —— 在 token 后加 <code>@槽位号</code>（0–4，自己指定）钉死：<code>pgnfw_xxx@0</code>，永不参与淘汰。每个 IP 只占一个槽位，换槽位号前先去面板删旧记录；手机等流动设备别钉，靠自愈就够。推荐：家宽 @0，剩 4 坑留给流动设备。</div></details>
       <details><summary>走代理时会把代理节点 IP 加白吗？</summary><div class="bd">一般不会：请求直连官方 IP <code>124.221.69.228</code>，按域名分流的代理碰不到。iOS 模块已内置直连规则；TUN / 透明代理全局接管的场景加一条 <code>IP-CIDR,124.221.69.228/32,DIRECT,no-resolve</code>。软路由跑脚本时确认路由器自身流量不进代理链（如 OpenClash「绕过本机」）。</div></details>
       <details><summary>白名单 5/5 满了怎么办？</summary><div class="bd">不用管：按写入时间自动淘汰最旧的，被挤出的设备最迟一个周期自动补回。想保住关键网段用固定槽位。</div></details>
-      <details><summary>token 安全吗？</summary><div class="bd">token 即该机器的加白凭证，请勿公开分享。本页填写的 token 只保存在你的浏览器 localStorage，不会上传；仓库与模块不包含任何 token。</div></details>
+      <details><summary>token 安全吗？</summary><div class="bd">token 即该机器的加白凭证，请勿公开分享。本页填写的 token 仅在浏览器允许时保存到 localStorage，不会添加到模块下载链接中；安装命令和配置会包含你填写的 token，请勿分享。</div></details>
       <details><summary>怎么卸载？</summary><div class="bd">OpenWrt：删除 <code>/usr/bin/po0fw</code>、<code>/etc/po0fw.conf</code>、<code>/etc/hotplug.d/iface/99-po0fw</code> 并清理 crontab · Linux：<code>systemctl disable --now po0fw.timer</code> 后删相关文件 · Windows：任务计划程序删「po0fw」· 手机端：删对应模块 / 宏 / 自动化。</div></details>
     </div>
   </div>
@@ -401,23 +402,26 @@ powershell -ExecutionPolicy Bypass -File i.ps1 -Tokens "<span class="tk" data-t>
 
 <footer>
   <div class="wrap">
-    MIT License · <a href="https://github.com/w0ven/po0fw">w0ven/po0fw</a> · iOS 模块借鉴学习自 <a href="https://github.com/reallinzc/po0fw">reallinzc/po0fw</a>，感谢原作者 · 图文教程见 <a href="https://wiki.uuuz.de/guide/tutorials/po0fw-whitelist">wiki.uuuz.de</a>
+    MIT License · 本 fork <a href="https://github.com/prur/po0fw">prur/po0fw</a> · 上游 <a href="https://github.com/w0ven/po0fw">w0ven/po0fw</a> · iOS 模块借鉴学习自 <a href="https://github.com/reallinzc/po0fw">reallinzc/po0fw</a>，感谢原作者 · 图文教程见 <a href="https://wiki.uuuz.de/guide/tutorials/po0fw-whitelist">wiki.uuuz.de</a>
   </div>
 </footer>
 
 <script>
 (function(){
-  var RAW="https://raw.githubusercontent.com/w0ven/po0fw/main/";
+  var RAW="https://raw.githubusercontent.com/prur/po0fw/main/";
   var inp=document.getElementById('tok'),st=document.getElementById('tokState');
   var PH="pgnfw_你的token";
+  // A downloaded file or a browser with storage disabled must still offer links.
+  function readSavedToken(){try{return localStorage.getItem('po0fw_token')}catch(e){return null}}
+  function saveToken(t){try{localStorage.setItem('po0fw_token',t)}catch(e){}}
   function tok(){var v=inp.value.trim();return /^pgnfw_[A-Za-z0-9]+(@\d)?$/.test(v)?v:null}
   function refresh(){
     var t=tok(),show=t||PH;
     document.querySelectorAll('[data-t]').forEach(function(e){e.textContent=show});
-    if(t){st.textContent="已应用到本页所有命令";st.classList.add('ok');localStorage.setItem('po0fw_token',t)}
+    if(t){st.textContent="已应用到本页所有命令";st.classList.add('ok');saveToken(t)}
     else{st.textContent=inp.value.trim()?"格式应为 pgnfw_xxx 或 pgnfw_xxx@0":"未填写，命令中显示占位符";st.classList.remove('ok')}
   }
-  var saved=localStorage.getItem('po0fw_token');if(saved){inp.value=saved}
+  var saved=readSavedToken();if(saved){inp.value=saved}
   inp.addEventListener('input',refresh);refresh();
 
   document.querySelectorAll('#tabs button').forEach(function(b){b.addEventListener('click',function(){

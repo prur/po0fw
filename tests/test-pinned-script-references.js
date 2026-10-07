@@ -7,7 +7,7 @@ const path = require("node:path");
 const { execFileSync } = require("node:child_process");
 
 const root = path.join(__dirname, "..");
-const sha = "ae29f759f64c21b71ed9ea2bc0b326a7da7388ba";
+const sha = "5c98e31edcb8c42eb885e1a7a93e958dd092aed7";
 const pinnedUrl = `https://raw.githubusercontent.com/prur/po0fw/${sha}/scripts/po0-firewall-whitelist.js`;
 const expectedReferenceCounts = new Map([
   ["surge/po0-firewall-whitelist.sgmodule", 4],
