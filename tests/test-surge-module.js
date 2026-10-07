@@ -8,7 +8,7 @@ const path = require("node:path");
 const modulePath = path.join(__dirname, "..", "surge", "po0-firewall-whitelist.sgmodule");
 const source = fs.readFileSync(modulePath, "utf8");
 const lines = source.split(/\r?\n/);
-const PINNED_SCRIPT_SHA = "a4dffeada04afa4055d7d5c4a66c65dc0c061e49";
+const PINNED_SCRIPT_SHA = "5c98e31edcb8c42eb885e1a7a93e958dd092aed7";
 const PINNED_SCRIPT_URL = `https://raw.githubusercontent.com/prur/po0fw/${PINNED_SCRIPT_SHA}/scripts/po0-firewall-whitelist.js`;
 
 function lineStartingWith(prefix) {

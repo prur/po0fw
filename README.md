@@ -56,15 +56,15 @@ Surge / Loon / Stash / Quantumult X / Shadowrocket / Egern 六客户端模块（
 [`f4986ab`](https://github.com/w0ven/po0fw/commit/f4986abefe2c0f5451aa819b386698668ef836f5)，
 并以 `baseline-upstream-f4986ab` 标签标记。因此无需额外复制一份仓库即可回退。
 
-- `network-changed` 与 `engine-started` 使用无 CAS 持久化存储实现 30 秒 best-effort 所有者租约，并在 100ms 后复读确认胜者；租约不在完成时清零，而是留到 TTL 过期，避免旧 owner 的非原子清理擦掉新 owner。服务端幂等和 GET-first 是并发下的最终防线。获胜会话按至少 3 秒、5 秒、8 秒的间隔确认三轮，最后一轮延迟到原租约到期后至少 3 秒，覆盖整个合并窗口及窗口末尾切网的稳定时间。快速响应时约 33 秒结束，避免任务已结束却仍吞掉后续切网事件；不会读取新 owner 的租约来延长旧任务，也不会清除新 owner 的记录。
+- `network-changed` 与 `engine-started` 使用无 CAS 持久化存储实现 8 秒 best-effort 所有者租约，并在 100ms 后复读确认胜者；租约不在完成时清零，而是留到 TTL 过期，避免旧 owner 的非原子清理擦掉新 owner。8 秒只合并立即重复触发，约 20 秒后的真实 SIM/运营商切换会获得自己的完整三轮计划。服务端幂等和 GET-first 是并发下的最终防线。
 - 所有自动任务先只读 GET；只有当前来源 `/24` 缺失时才 POST `/add`。这避免一次系统切网风暴产生多组重复写入并撞服务端限频。
-- 事件 GET/POST 各自最多等待 5 秒、不做嵌套重试，最坏 46.1 秒；cron/button 单次最多 7 秒并保留三次瞬时错误重试，GET+POST 最坏 51 秒；auto-interval 只发一次 GET，均在模块 60 秒预算内。
+- 事件以计划起点后的 3 秒、8 秒、16 秒为确认点；慢请求不叠加多余等待。GET/POST 各自最多 5 秒，名义最坏约 33.1 秒；50 秒绝对预算会在剩余时间不足一轮时 fail-closed。cron/button 单次最多 7 秒并保留三次瞬时错误重试，GET+POST 最坏 51 秒；auto-interval 只发一次 GET，均在模块 60 秒预算内。
 - Surge cron 启用 `wake-system=true`，使 iOS 空闲或 App 被挂起时仍可每 10 分钟兜底。
 - 增加 `engine-started` 触发器。该事件要求 **Surge iOS 5.22.0+ / Surge Mac 6.9.0+**；更旧版本应删除 `po0-fw-start` 行。
 - Surge 面板 `auto-interval` 与 Stash `tile` 刷新只读 GET；Surge 刷新按钮先 GET、仅在缺失时 POST。`update-interval=1` 让 Surge 每次重新进入策略页都读取最新状态，但不会在后台持续轮询，也不会跟随 event/cron 结果主动推送。
 - HTTP 非 2xx、嵌入式 `code>=400` 和成功响应字段缺失均会显示经过脱敏的真实错误，不再出现 `0/undefined`；日志记录触发来源、轮次、接口、耗时、HTTP/API 状态和回显 IP，但不记录 token 或完整 URL。
 - 使用共享 JavaScript 的五个客户端模块（Surge、Loon、Stash、Quantumult X、Shadowrocket）固定引用已审计脚本提交
-  [`a4dffea`](https://github.com/prur/po0fw/commit/a4dffeada04afa4055d7d5c4a66c65dc0c061e49)，不跟随可变的 `main`。
+  [`5c98e31`](https://github.com/prur/po0fw/commit/5c98e31edcb8c42eb885e1a7a93e958dd092aed7)，不跟随可变的 `main`。
 
 回退脚本时可把 `script-path` 改为原始基线的不可变 URL：
 
