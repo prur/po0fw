@@ -14,7 +14,7 @@ http:
 
 script-providers:
   po0-fw:
-    url: https://raw.githubusercontent.com/prur/po0fw/666e27e764a21e1403b2523391b4ca0a13acc7b7/scripts/po0-firewall-whitelist.js
+    url: https://raw.githubusercontent.com/prur/po0fw/367b1044b5dc9954212146649ebebc3d3cfdb851/scripts/po0-firewall-whitelist.js
     interval: 86400
 
 cron:

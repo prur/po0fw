@@ -58,7 +58,7 @@ Surge / Loon / Stash / Quantumult X / Shadowrocket / Egern 六客户端脚本模
 - Surge 面板 `auto-interval` 与 Stash `tile` 刷新只读 GET；Surge 刷新按钮先 GET、仅在缺失时 POST。`update-interval=1` 让 Surge 每次重新进入策略页都读取最新状态，但不会在后台持续轮询，也不会跟随 event/cron 结果主动推送。
 - HTTP 非 2xx、嵌入式 `code>=400` 和成功响应字段缺失均会显示经过脱敏的真实错误，不再出现 `0/undefined`；日志记录触发来源、轮次、接口、耗时、HTTP/API 状态和回显 IP，但不记录 token 或完整 URL。
 - 使用共享 JavaScript 的五个客户端模块（Surge、Loon、Stash、Quantumult X、Shadowrocket）固定引用已审计脚本提交
-  [`666e27e`](https://github.com/prur/po0fw/commit/666e27e764a21e1403b2523391b4ca0a13acc7b7)，不跟随可变的 `main`。
+  [`367b104`](https://github.com/prur/po0fw/commit/367b1044b5dc9954212146649ebebc3d3cfdb851)，不跟随可变的 `main`。
 
 回退脚本时可把 `script-path` 改为原始基线的不可变 URL：
 
