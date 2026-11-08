@@ -786,11 +786,24 @@ function runEnsurePlan() {
   return sequence;
 }
 
+function isTransientFailure(st) {
+  if (!st) return false;
+  // 网络传输层异常（timeout / 握手失败 / 连接重置）
+  if (st.error && !st.httpStatus && !st.apiCode) return true;
+  // HTTP 协议层瞬态错误：网关超时、服务暂不可用、限流
+  var status = Number(st.httpStatus);
+  if (status === 408 || status === 425 || status === 429 || status >= 500) return true;
+  var apiCode = Number(st.apiCode);
+  if (apiCode === 408 || apiCode === 425 || apiCode === 429 || apiCode >= 500) return true;
+  return false;
+}
+
 function completeRun(results) {
   var okCount = 0;
   var exitIp = "?";
   var lines = [];
   var changed = false;
+  var hasActionableFailure = false;
 
   for (var i = 0; i < results.length; i++) {
     var st = results[i].st;
@@ -798,10 +811,16 @@ function completeRun(results) {
     if (st.currentIp) exitIp = st.currentIp;
     lines.push(describe(i, results[i]));
 
-    var state = (st.currentIp || "?") + "|" + (st.ready ? "1" : "0");
-    if (storeRead(results[i].kvState) !== state) {
-      storeWrite(state, results[i].kvState);
-      changed = true;
+    if (!st.ready && !isTransientFailure(st)) {
+      hasActionableFailure = true;
+    }
+
+    if (st.ready) {
+      var state = (st.currentIp || "?") + "|1";
+      if (storeRead(results[i].kvState) !== state) {
+        storeWrite(state, results[i].kvState);
+        changed = true;
+      }
     }
   }
 
@@ -822,9 +841,20 @@ function completeRun(results) {
   var content = lines.join("\n");
   if (isPanelInvocation()) content += "\n\n" + describeLastAutoSuccess();
 
-  // 成功态仅在出口 IP / 加白状态变化时通知；失败/未生效必须每次弹。
-  // 面板 auto-interval 是只读后台刷新，只更新卡片缓存，不发送系统通知。
-  if ((changed || !allOk) && triggerName !== "auto-interval") {
+  // 成功态在出口 IP / 状态变化时通知；
+  // 自动后台任务（cron / network-changed / engine-started）对瞬态网络抖动/503静默，
+  // 仅在存在需人工干预的确定性失败（如 token 无效 / 槽位冲突）时通知；
+  // 手动操作（button / manual）始终全量通知。
+  var shouldNotify = false;
+  if (triggerName === "auto-interval") {
+    shouldNotify = false;
+  } else if (!isAutomaticTrigger(triggerName)) {
+    shouldNotify = changed || !allOk;
+  } else {
+    shouldNotify = changed || hasActionableFailure;
+  }
+
+  if (shouldNotify) {
     notify("po0 防火墙加白", title, content);
   }
   finish(title, content, allOk);

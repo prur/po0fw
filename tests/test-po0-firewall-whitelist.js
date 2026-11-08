@@ -345,7 +345,24 @@ async function testFinalRoundFailureIsNotReportedAsAutomaticSuccess() {
   assert.equal(run.posts.length, 0);
   assert.match(run.result.title, /po0 加白 0\/1/);
   assert.equal(run.store.has("po0_fw_last_auto_success"), false);
-  assert.ok(run.notifications.length >= 1, "a failed final confirmation must notify");
+  assert.equal(run.notifications.length, 0, "transient offline error during auto event must stay silent");
+}
+
+async function testActionableErrorNotifiesDuringAutomaticRun() {
+  const run = await runSurgeScript({
+    cronexp: "*/10 * * * *",
+    scriptType: "cron",
+    argument: "tokens=pgnfw_test_secret@0",
+    responses: [
+      { body: stateBody("198.51.100.0/24", [{ ip: "198.51.100.0/24", slot: 1 }]) },
+      { status: 403, body: JSON.stringify({ code: 403, message: "slot conflict", currentIp: "198.51.100.0/24" }) },
+    ],
+  });
+
+  assert.equal(run.gets.length, 1);
+  assert.equal(run.posts.length, 1);
+  assert.match(run.result.content, /槽位冲突/);
+  assert.ok(run.notifications.length >= 1, "actionable error such as slot conflict must notify");
 }
 
 async function testMultipleTokensAreConfirmedInEveryRound() {
