@@ -134,11 +134,11 @@ function runClient(client, configureContext = null) {
 
 (async () => {
   const expectedTimeout = {
-    surge: 7,
-    shadowrocket: 7,
-    stash: 7,
-    loon: 7000,
-    quantumultx: 7000,
+    surge: 12,
+    shadowrocket: 12,
+    stash: 12,
+    loon: 12000,
+    quantumultx: 12000,
   };
 
   for (const client of Object.keys(expectedTimeout)) {

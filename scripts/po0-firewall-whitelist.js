@@ -20,9 +20,9 @@
  *   旧 owner 的非原子清理擦掉新 owner。服务端幂等与 GET-first 仍是并发下的最终防线。
  *   获胜会话再按 3s、5s、8s 的间隔确认三次，覆盖双 SIM 切换期间
  *   IPv6-only / 旧出口 / 新出口三个阶段。
- * - 事件路径单次 GET/POST 最多等 5 秒且不做嵌套重试，GET+POST 的最坏总运行
- *   约 46.1 秒，保持在模块 timeout=60 的预算内；cron / button 单次最多 7 秒并保留
- *   三次瞬时错误重试，GET+POST 的最坏总运行 51 秒；auto-interval 只发一次 GET。
+ * - 事件路径单次 GET/POST 最多等 6 秒且不做嵌套重试，GET+POST 的最坏总运行
+ *   约 52.1 秒，保持在模块 timeout=60 的预算内；cron / button 单次最多 12 秒，保留
+ *   一次瞬时重试（总共最多 2 次尝试），GET+POST 的最坏总运行约 51 秒；auto-interval 只发一次 GET。
  * - 面板 auto-interval 只做 GET；button 先 GET，缺失时才 POST，因此查看状态不会写白名单。
  * - 默认 slotless 写入：新 /24 在满额时按 FIFO 淘汰最旧普通记录；重复 /24
  *   服务端幂等，不重复占坑，也不推进淘汰队列。
@@ -170,7 +170,7 @@ function delay(ms) {
 
 // 移动网络下单次请求失败很常见（cron 触发时链路刚唤醒 / 切网瞬间）。
 // 服务端对重复 IP 幂等，重试 POST /add 不会重复占坑或推进淘汰队列，因此可安全重试。
-var HTTP_RETRY = 3;
+var HTTP_RETRY = 2;
 var HTTP_RETRY_DELAY_MS = 1500;
 
 // 服务端瞬时异常也值得重试：po0 API 偶发返回裸 400（body 仅 "Error"）/ 5xx，
@@ -763,7 +763,7 @@ function runEnsurePlan() {
   var needsStabilization = triggerName === "network-changed" || triggerName === "engine-started";
   if (!needsStabilization) {
     var regularOptions = null;
-    var regularTimeout = timeoutValue(7);
+    var regularTimeout = timeoutValue(12);
     if (isPanelInvocation() && triggerName === "auto-interval") {
       regularOptions = { readOnly: true, timeout: regularTimeout, maxAttempts: 1 };
     } else if (isPanelInvocation() && triggerName === "button") {
@@ -774,7 +774,7 @@ function runEnsurePlan() {
     return runEnsureRound(regularOptions, 1, 1);
   }
 
-  var eventRequestOptions = { maxAttempts: 1, timeout: timeoutValue(5), preflight: true };
+  var eventRequestOptions = { maxAttempts: 1, timeout: timeoutValue(6), preflight: true };
   var sequence = Promise.resolve(null);
   STABILIZATION_DELAYS_MS.forEach(function (waitMs, index) {
     sequence = sequence.then(function () {

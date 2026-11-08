@@ -305,7 +305,7 @@ async function testEventWorstCaseBudgetStaysUnderModuleTimeout() {
   const budgetMs =
     run.delays.reduce((sum, ms) => sum + ms, 0) +
     [...run.gets, ...run.posts].reduce((sum, request) => sum + request.timeout * 1000, 0);
-  assert.equal(budgetMs, 46100);
+  assert.equal(budgetMs, 52100);
   assert.ok(budgetMs < 60000);
 }
 
@@ -323,8 +323,8 @@ async function testNetworkChangeUsesBoundedIndependentAttempts() {
   assert.equal(run.posts.length, 0);
   assert.deepEqual(
     run.gets.map((request) => request.timeout),
-    [5, 5, 5],
-    "each Surge event request must have a five-second cap",
+    [6, 6, 6],
+    "each Surge event request must have a six-second cap",
   );
   assert.deepEqual(run.delays, [100, 3000, 5000, 8000]);
   assert.match(run.result.title, /po0 加白 0\/1/);
@@ -386,7 +386,7 @@ async function testEngineStartUsesTheSameStabilizationPlan() {
   assert.equal(run.gets.length, 3);
   assert.equal(run.posts.length, 0);
   assert.deepEqual(run.delays, [100, 3000, 5000, 8000]);
-  assert.deepEqual(run.gets.map((request) => request.timeout), [5, 5, 5]);
+  assert.deepEqual(run.gets.map((request) => request.timeout), [6, 6, 6]);
 }
 
 async function testCronSkipsWriteWhenAlreadyApplied() {
@@ -398,7 +398,7 @@ async function testCronSkipsWriteWhenAlreadyApplied() {
 
   assert.equal(run.gets.length, 1);
   assert.equal(run.posts.length, 0);
-  assert.equal(run.gets[0].timeout, 7);
+  assert.equal(run.gets[0].timeout, 12);
   assert.equal(JSON.parse(run.store.get("po0_fw_last_auto_success")).trigger, "cron");
 }
 
@@ -408,15 +408,14 @@ async function testCronKeepsTransientRetriesAndRecordsSuccess() {
     scriptType: "cron",
     responses: [
       { error: "offline" },
-      { error: "offline" },
       { body: successBody("198.51.100.0/24") },
     ],
   });
 
-  assert.equal(run.gets.length, 3);
+  assert.equal(run.gets.length, 2);
   assert.equal(run.posts.length, 0);
-  assert.deepEqual(run.gets.map((request) => request.timeout), [7, 7, 7]);
-  assert.deepEqual(run.delays, [1500, 3000]);
+  assert.deepEqual(run.gets.map((request) => request.timeout), [12, 12]);
+  assert.deepEqual(run.delays, [1500]);
   assert.equal(run.logs.length, 1);
   assert.match(run.logs[0], /trigger=cron/);
   const lastSuccess = JSON.parse(run.store.get("po0_fw_last_auto_success"));
@@ -428,10 +427,10 @@ async function testMissingHttpStatusRetriesAndFailsClosed() {
   const run = await runSurgeScript({
     trigger: "button",
     scriptType: "generic",
-    responses: [missingStatus, missingStatus, missingStatus],
+    responses: [missingStatus, missingStatus],
   });
 
-  assert.equal(run.gets.length, 3);
+  assert.equal(run.gets.length, 2);
   assert.equal(run.posts.length, 0);
   assert.match(run.result.content, /HTTP 响应缺少有效状态码/);
 }
@@ -441,7 +440,7 @@ async function testTransportErrorRedactsCredential() {
   const run = await runSurgeScript({
     trigger: "button",
     scriptType: "generic",
-    responses: [{ error: rawError }, { error: rawError }, { error: rawError }],
+    responses: [{ error: rawError }, { error: rawError }],
   });
 
   assert.match(run.result.content, /pgnfw_REDACTED/);
@@ -457,12 +456,12 @@ async function testJsonHttpErrorIsRetriedAndRenderedClearly() {
   const run = await runSurgeScript({
     trigger: "button",
     scriptType: "generic",
-    responses: [errorResponse, errorResponse, errorResponse],
+    responses: [errorResponse, errorResponse],
   });
 
-  assert.equal(run.gets.length, 3, "HTTP 429 should use the normal transient retry budget");
+  assert.equal(run.gets.length, 2, "HTTP 429 should use the normal transient retry budget");
   assert.equal(run.posts.length, 0);
-  assert.deepEqual(run.delays, [1500, 3000]);
+  assert.deepEqual(run.delays, [1500]);
   assert.match(run.result.content, /HTTP 429/);
   assert.match(run.result.content, /Too many requests/);
   assert.doesNotMatch(run.result.content, /undefined/);
@@ -517,11 +516,11 @@ async function testEmbeddedApi429IsRetried() {
   const run = await runSurgeScript({
     trigger: "button",
     scriptType: "generic",
-    responses: [embeddedError, embeddedError, embeddedError],
+    responses: [embeddedError, embeddedError],
   });
 
-  assert.equal(run.gets.length, 3);
-  assert.deepEqual(run.delays, [1500, 3000]);
+  assert.equal(run.gets.length, 2);
+  assert.deepEqual(run.delays, [1500]);
   assert.match(run.result.content, /API 429：request frequency too high for pgnfw_REDACTED/);
   assert.doesNotMatch(run.result.content, /pgnfw_test_secret/);
 }
@@ -535,7 +534,7 @@ async function testPanelAutoIntervalUsesReadOnlyStatus() {
 
   assert.equal(run.gets.length, 1);
   assert.equal(run.posts.length, 0, "automatic panel refresh must never mutate the whitelist");
-  assert.equal(run.gets[0].timeout, 7);
+  assert.equal(run.gets[0].timeout, 12);
   assert.match(run.result.title, /po0 加白 1\/1/);
 }
 
@@ -629,8 +628,8 @@ async function testPanelButtonAddsOnlyWhenCurrentNetworkIsMissing() {
 
   assert.equal(run.gets.length, 1);
   assert.equal(run.posts.length, 1);
-  assert.equal(run.gets[0].timeout, 7);
-  assert.equal(run.posts[0].timeout, 7);
+  assert.equal(run.gets[0].timeout, 12);
+  assert.equal(run.posts[0].timeout, 12);
   assert.match(run.result.title, /po0 加白 1\/1/);
 }
 
@@ -643,16 +642,14 @@ async function testButtonWorstCaseRetryBudgetStaysUnderModuleTimeout() {
     scriptType: "generic",
     responses: [
       retry,
-      retry,
       { body: stateBody(newIp, [oldIp]) },
-      retry,
       retry,
       { body: stateBody(newIp, [oldIp, newIp]) },
     ],
   });
 
-  assert.equal(run.gets.length, 3);
-  assert.equal(run.posts.length, 3);
+  assert.equal(run.gets.length, 2);
+  assert.equal(run.posts.length, 2);
   const budgetMs =
     run.delays.reduce((sum, ms) => sum + ms, 0) +
     [...run.gets, ...run.posts].reduce((sum, request) => sum + request.timeout * 1000, 0);
